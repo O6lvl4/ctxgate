@@ -265,6 +265,11 @@ fn bash_as_runner(cfg: config.Config, command: String, id: String, text: String)
   }
 }
 
+let GENERIC_MIN = 12000   // bytes; below this the generic view is not worth a possible retry
+
+fn narrowed_by_model(tool: String, command: String) -> Bool =
+  tool == "Bash" and list.any(["grep ", "rg ", "sed -n", "awk ", "head ", "tail ", "| cut", "jq "], (f) => string.contains(command, f))
+
 effect fn vault_and_replace(cfg: config.Config, j: Value, tool: String, input: Value, resp: Value, shape: Shape, prefix_text: String, banner: String) -> Result[String, String] = {
   let persisted = option.is_some(json.get_string(resp, "persistedOutputPath"))
   let text = full_text(resp, prefix_text)!
@@ -291,6 +296,11 @@ effect fn vault_and_replace(cfg: config.Config, j: Value, tool: String, input: V
   // leave the original in place. Persisted outputs are the exception — the model would only
   // see a 2 KB preview of the raw text anyway.
   guard persisted or string.len(rendered) * 10 < string.len(text) * 6 else err("not worth replacing")
+  // The generic head/tail view knows nothing about the content, so it only pays off on big
+  // outputs, and never on output the model already narrowed itself (grep / sed -n / awk /
+  // head / tail pipelines): cutting a 4 KB excerpt to 2 KB was a miss 2 times out of 3 in a
+  // real session. Runner / git / outline / search views carry the verdict and are exempt.
+  guard persisted or kind != "generic" or (string.len(text) >= GENERIC_MIN and not narrowed_by_model(tool, label)) else err("generic view withheld")
   tune.record_hit(cfg, json.get_string(j, "session_id") ?? "", kind, id, label) ?? ()
   journal.append(cfg, json.get_string(j, "session_id") ?? "", journal.summary_line(tool, label, id, rendered, string.len(text))) ?? ()
   let rendered_b = if banner == "" then rendered else banner + "\n" + rendered
@@ -356,3 +366,11 @@ test "label_of picks the identifying field" {
   assert_eq(label_of("Bash", value.object([("command", value.str("cargo test"))])), "cargo test")
   assert_eq(label_of("Read", value.object([("file_path", value.str("/a/b.rs"))])), "/a/b.rs")
 }
+
+test "narrowed_by_model spots filter pipelines" {
+  assert(narrowed_by_model("Bash", "cd x && grep -nE foo src/*.rs"))
+  assert(narrowed_by_model("Bash", "sed -n 259,296p stdlib/regex_engine.almd"))
+  assert(not narrowed_by_model("Bash", "cargo test --workspace"))
+  assert(not narrowed_by_model("Read", "grep "))
+}
+
