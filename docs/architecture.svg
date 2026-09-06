@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="660" viewBox="0 0 1120 660" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3b3b3b"/>
+    </marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1f6feb"/>
+    </marker>
+  </defs>
+  <style>
+    .box { fill:#ffffff; stroke:#3b3b3b; stroke-width:1.4; rx:6; }
+    .gate { fill:#eef4ff; stroke:#1f6feb; stroke-width:1.6; rx:6; }
+    .store { fill:#fff8e6; stroke:#b8860b; stroke-width:1.4; rx:6; }
+    .t { fill:#1f1f1f; }
+    .h { fill:#1f1f1f; font-weight:600; font-size:14px; }
+    .s { fill:#555; font-size:12px; }
+    .l { fill:#3b3b3b; font-size:12px; }
+    .lb { fill:#1f6feb; font-size:12px; }
+    .arrow { stroke:#3b3b3b; stroke-width:1.4; fill:none; marker-end:url(#a); }
+    .arrowb { stroke:#1f6feb; stroke-width:1.4; fill:none; marker-end:url(#ab); stroke-dasharray:5 4; }
+    .lvl { stroke:#3b3b3b; stroke-width:1; }
+  </style>
+  <rect x="0" y="0" width="1120" height="660" fill="#ffffff"/>
+
+  <text x="20" y="30" class="h" font-size="16">ctxgate — where it sits and what it does</text>
+
+  <!-- top row: the tool call -->
+  <rect x="20" y="70" width="150" height="64" class="box"/>
+  <text x="95" y="97" text-anchor="middle" class="h">Claude Code</text>
+  <text x="95" y="116" text-anchor="middle" class="s">runs the tool</text>
+
+  <rect x="250" y="70" width="150" height="64" class="gate"/>
+  <text x="325" y="92" text-anchor="middle" class="h">hook pre</text>
+  <text x="325" y="109" text-anchor="middle" class="s">rtk rewrite of Bash</text>
+  <text x="325" y="124" text-anchor="middle" class="s">records a miss</text>
+
+  <rect x="480" y="70" width="150" height="64" class="box"/>
+  <text x="555" y="92" text-anchor="middle" class="h">tool</text>
+  <text x="555" y="109" text-anchor="middle" class="s">Bash · Read · Grep</text>
+  <text x="555" y="124" text-anchor="middle" class="s">Glob · MCP</text>
+
+  <rect x="710" y="70" width="150" height="64" class="gate"/>
+  <text x="785" y="92" text-anchor="middle" class="h">hook post</text>
+  <text x="785" y="109" text-anchor="middle" class="s">raw output in,</text>
+  <text x="785" y="124" text-anchor="middle" class="s">view out, same shape</text>
+
+  <rect x="940" y="70" width="150" height="64" class="box"/>
+  <text x="1015" y="97" text-anchor="middle" class="h">model</text>
+  <text x="1015" y="116" text-anchor="middle" class="s">sees the view</text>
+
+  <line x1="170" y1="102" x2="248" y2="102" class="arrow"/>
+  <text x="209" y="92" text-anchor="middle" class="l">PreToolUse</text>
+  <line x1="400" y1="102" x2="478" y2="102" class="arrow"/>
+  <text x="439" y="92" text-anchor="middle" class="l">input</text>
+  <line x1="630" y1="102" x2="708" y2="102" class="arrow"/>
+  <text x="669" y="92" text-anchor="middle" class="l">PostToolUse</text>
+  <line x1="860" y1="102" x2="938" y2="102" class="arrow"/>
+  <text x="899" y="92" text-anchor="middle" class="l">view</text>
+
+  <!-- inside hook post -->
+  <rect x="250" y="180" width="610" height="205" fill="#f6f9ff" stroke="#1f6feb" stroke-width="1" stroke-dasharray="4 3" rx="8"/>
+  <text x="262" y="200" class="lb" font-weight="600">inside hook post</text>
+  <line x1="785" y1="134" x2="785" y2="178" class="arrowb"/>
+
+  <rect x="265" y="215" width="130" height="44" class="box"/>
+  <text x="330" y="234" text-anchor="middle" class="t">1. redact</text>
+  <text x="330" y="250" text-anchor="middle" class="s">secrets masked</text>
+  <rect x="410" y="215" width="130" height="44" class="box"/>
+  <text x="475" y="234" text-anchor="middle" class="t">2. vault</text>
+  <text x="475" y="250" text-anchor="middle" class="s">raw text stored</text>
+  <rect x="555" y="215" width="130" height="44" class="box"/>
+  <text x="620" y="234" text-anchor="middle" class="t">3. level</text>
+  <text x="620" y="250" text-anchor="middle" class="s">from transcript usage</text>
+  <rect x="700" y="215" width="130" height="44" class="box"/>
+  <text x="765" y="234" text-anchor="middle" class="t">4. seen before?</text>
+  <text x="765" y="250" text-anchor="middle" class="s">this session</text>
+
+  <line x1="395" y1="237" x2="408" y2="237" class="arrow"/>
+  <line x1="540" y1="237" x2="553" y2="237" class="arrow"/>
+  <line x1="685" y1="237" x2="698" y2="237" class="arrow"/>
+
+  <!-- one of four outcomes -->
+  <path d="M765,259 L765,280 L330,280 L330,298" class="arrow"/>
+  <path d="M765,280 L475,280 L475,298" class="arrow"/>
+  <path d="M765,280 L620,280 L620,298" class="arrow"/>
+  <line x1="765" y1="259" x2="765" y2="298" class="arrow"/>
+
+  <rect x="265" y="300" width="130" height="64" class="box"/>
+  <text x="330" y="320" text-anchor="middle" class="t">pass through</text>
+  <text x="330" y="336" text-anchor="middle" class="s">new, within budget</text>
+  <text x="330" y="351" text-anchor="middle" class="s">(almost always at NORMAL)</text>
+  <rect x="410" y="300" width="130" height="64" class="box"/>
+  <text x="475" y="320" text-anchor="middle" class="t">one line</text>
+  <text x="475" y="336" text-anchor="middle" class="s">same output again</text>
+  <rect x="555" y="300" width="130" height="64" class="box"/>
+  <text x="620" y="320" text-anchor="middle" class="t">line diff</text>
+  <text x="620" y="336" text-anchor="middle" class="s">changed since seen</text>
+  <rect x="700" y="300" width="130" height="64" class="box"/>
+  <text x="765" y="320" text-anchor="middle" class="t">view</text>
+  <text x="765" y="336" text-anchor="middle" class="s">test verdict · outline</text>
+  <text x="765" y="351" text-anchor="middle" class="s">diff table · head/tail</text>
+
+  <!-- stores -->
+  <rect x="250" y="440" width="260" height="70" class="store"/>
+  <text x="380" y="465" text-anchor="middle" class="h">~/.ctxgate/store</text>
+  <text x="380" y="483" text-anchor="middle" class="s">raw outputs, content-addressed</text>
+  <text x="380" y="499" text-anchor="middle" class="s">kept 14 days</text>
+  <rect x="560" y="440" width="260" height="70" class="store"/>
+  <text x="690" y="465" text-anchor="middle" class="h">~/.ctxgate/sessions</text>
+  <text x="690" y="483" text-anchor="middle" class="s">journal · seen · misses · usage</text>
+  <text x="690" y="499" text-anchor="middle" class="s">per session id</text>
+
+  <line x1="380" y1="385" x2="380" y2="438" class="arrow"/>
+  <text x="392" y="415" class="l">raw text (2)</text>
+  <line x1="690" y1="385" x2="690" y2="438" class="arrow"/>
+  <text x="702" y="415" class="l">level, seen, misses (3, 4)</text>
+
+  <!-- recap after compaction -->
+  <rect x="880" y="440" width="210" height="70" class="gate"/>
+  <text x="985" y="463" text-anchor="middle" class="h">hook compact / session</text>
+  <text x="985" y="481" text-anchor="middle" class="s">PreCompact: forget "seen"</text>
+  <text x="985" y="497" text-anchor="middle" class="s">SessionStart: recap with ids</text>
+  <line x1="820" y1="475" x2="878" y2="475" class="arrow"/>
+  <line x1="985" y1="440" x2="985" y2="136" class="arrowb"/>
+  <text x="997" y="290" class="lb">recap</text>
+
+  <!-- the model fetches from the vault -->
+  <path d="M1090,110 L1106,110 L1106,545 L380,545 L380,512" class="arrowb"/>
+  <text x="712" y="537" text-anchor="middle" class="lb">ctxgate show &lt;id&gt; --symbol NAME | --grep RE | --lines A-B   — the model fetches exactly what it needs</text>
+
+  <!-- levels -->
+  <text x="20" y="592" class="h">levels, by how full the window is</text>
+  <rect x="20" y="602" width="150" height="30" fill="#e8f5e9" class="lvl"/>
+  <text x="95" y="621" text-anchor="middle" class="t">NORMAL 0–40%</text>
+  <rect x="170" y="602" width="150" height="30" fill="#fff3cd" class="lvl"/>
+  <text x="245" y="621" text-anchor="middle" class="t">COMPRESS 40%</text>
+  <rect x="320" y="602" width="150" height="30" fill="#ffe0b2" class="lvl"/>
+  <text x="395" y="621" text-anchor="middle" class="t">AGGRESSIVE 60%</text>
+  <rect x="470" y="602" width="150" height="30" fill="#ffcdd2" class="lvl"/>
+  <text x="545" y="621" text-anchor="middle" class="t">ISOLATE 75%</text>
+  <text x="640" y="614" class="s">NORMAL replaces only repeats and persisted output.</text>
+  <text x="640" y="629" class="s">Higher levels lower Bash/Read thresholds and shorten views. Grep/Glob: never.</text>
+  <text x="20" y="652" class="s">Compaction returns the level to NORMAL. A replacement kind that keeps making the model ask again (a miss) is softened for the rest of the session.</text>
+</svg>

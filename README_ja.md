@@ -146,51 +146,13 @@ id は他と区別できる長さまで省略できる。
 
 ## アーキテクチャ
 
-```mermaid
-flowchart LR
-    CC[Claude Code] -->|PreToolUse| PRE[ctxgate hook pre]
-    PRE -->|書き換えたコマンド、<br/>miss を記録| TOOL[Bash · Read · Grep · Glob · MCP]
-    TOOL -->|生の出力| POST[ctxgate hook post]
-    POST -->|同じ JSON の形で表示を返す| MODEL((モデル))
+![ctxgate architecture](docs/architecture.svg)
 
-    subgraph post [hook post の中]
-        direction TB
-        R[秘密情報をマスク] --> V[生の出力を vault に保存]
-        V --> L[transcript の usage からレベル決定]
-        L --> D{このセッションで見た?}
-        D -->|同じ| ONE[1 行]
-        D -->|変わった| DIFF[行の差分]
-        D -->|初見、予算超え| VIEW[テスト結果 · 目次 · diff 表 · 先頭/末尾]
-        D -->|初見、予算内| PASS[そのまま通す]
-    end
-    POST -.- post
-
-    MODEL -->|ctxgate show id --symbol / --grep| VAULT[(~/.ctxgate/store)]
-    V --> VAULT
-    L --> SESS[(~/.ctxgate/sessions<br/>journal · seen · tune · usage)]
-    CC -->|PreCompact / SessionStart| RECAP[ctxgate hook compact / session]
-    RECAP -->|vault の id 付き recap| MODEL
-    SESS --> RECAP
-```
-
-レベルはコンテキストウィンドウの埋まり具合で決まる:
-
-```mermaid
-stateDiagram-v2
-    direction LR
-    [*] --> NORMAL
-    NORMAL --> COMPRESS: 窓の 40%
-    COMPRESS --> AGGRESSIVE: 60%
-    AGGRESSIVE --> ISOLATE: 75%
-    ISOLATE --> NORMAL: compaction
-    NORMAL: NORMAL — 繰り返しと永続化された出力だけ
-    COMPRESS: COMPRESS — Bash > 8 KB、Read > 60 KB
-    AGGRESSIVE: AGGRESSIVE — Bash > 4 KB、Read > 24 KB、表示を短く
-    ISOLATE: ISOLATE — Bash > 3 KB、Read > 12 KB、表示は最小
-```
-
-Grep と Glob はレベルの対象外。モデルに聞き直させ続ける種類の置き換え（*miss*）は、レベルに
-関係なくそのセッションの残りで緩める。
+上段が 1 回のツール呼び出しの流れ。hook post の中で、マスク → vault に保存 → transcript から
+レベル決定 → 既視判定、の順に進み、そのまま通す / 1 行 / 行の差分 / 要約表示のどれかになる。
+モデルは `ctxgate show` で vault から必要な部分だけ取り出せる。下段はコンテキストウィンドウの
+埋まり具合で決まるレベル。Grep と Glob はレベルの対象外。モデルに聞き直させ続ける種類の置き換え
+（*miss*）は、レベルに関係なくそのセッションの残りで緩める。
 
 ## hook の役割
 
