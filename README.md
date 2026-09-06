@@ -141,7 +141,55 @@ Environment variables, no config file. The ones that matter:
 Also: `CTXGATE_HEAD` / `_TAIL` (30), `_SALIENT` (40), `_LINE_CLIP` (200), `_MAX_BLOCK` (20),
 `_OUTLINE_MAX` (120), `_DEDUP_MIN` (600), `_MAX_GREP` / `_MAX_OTHER` (30000).
 
-## How it works
+## Architecture
+
+```mermaid
+flowchart LR
+    CC[Claude Code] -->|PreToolUse| PRE[ctxgate hook pre]
+    PRE -->|rewritten command,<br/>miss recorded| TOOL[Bash · Read · Grep · Glob · MCP]
+    TOOL -->|raw output| POST[ctxgate hook post]
+    POST -->|view, same JSON shape| MODEL((model))
+
+    subgraph post [inside hook post]
+        direction TB
+        R[redact secrets] --> V[store raw in vault]
+        V --> L[level from transcript usage]
+        L --> D{seen this session?}
+        D -->|same| ONE[one line]
+        D -->|changed| DIFF[line diff]
+        D -->|new, over budget| VIEW[test verdict · outline · diff table · head/tail]
+        D -->|new, within budget| PASS[pass through]
+    end
+    POST -.- post
+
+    MODEL -->|ctxgate show id --symbol / --grep| VAULT[(~/.ctxgate/store)]
+    V --> VAULT
+    L --> SESS[(~/.ctxgate/sessions<br/>journal · seen · tune · usage)]
+    CC -->|PreCompact / SessionStart| RECAP[ctxgate hook compact / session]
+    RECAP -->|recap with vault ids| MODEL
+    SESS --> RECAP
+```
+
+Levels, driven by how full the window is:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    NORMAL: NORMAL<br/>nothing replaced except repeats and persisted output
+    COMPRESS: COMPRESS ≥ 40%<br/>Bash > 8 KB, Read > 60 KB
+    AGGRESSIVE: AGGRESSIVE ≥ 60%<br/>Bash > 4 KB, Read > 24 KB, shorter views
+    ISOLATE: ISOLATE ≥ 75%<br/>Bash > 3 KB, Read > 12 KB, minimal views
+    [*] --> NORMAL
+    NORMAL --> COMPRESS
+    COMPRESS --> AGGRESSIVE
+    AGGRESSIVE --> ISOLATE
+    ISOLATE --> NORMAL: compaction
+```
+
+Grep and Glob are outside the levels entirely. A kind of replacement that keeps making the
+model ask again (a *miss*) is softened for the rest of the session, whatever the level.
+
+## Hooks
 
 - **PreToolUse** hands Bash commands to rtk when present, and notes when a call is the model
   going back for something a summary withheld (a *miss*). Kinds that keep missing are softened

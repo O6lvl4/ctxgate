@@ -144,7 +144,55 @@ id は他と区別できる長さまで省略できる。
 その他: `CTXGATE_HEAD` / `_TAIL`（30）、`_SALIENT`（40）、`_LINE_CLIP`（200）、`_MAX_BLOCK`（20）、
 `_OUTLINE_MAX`（120）、`_DEDUP_MIN`（600）、`_MAX_GREP` / `_MAX_OTHER`（30000）。
 
-## 仕組み
+## アーキテクチャ
+
+```mermaid
+flowchart LR
+    CC[Claude Code] -->|PreToolUse| PRE[ctxgate hook pre]
+    PRE -->|書き換えたコマンド、<br/>miss を記録| TOOL[Bash · Read · Grep · Glob · MCP]
+    TOOL -->|生の出力| POST[ctxgate hook post]
+    POST -->|同じ JSON の形で表示を返す| MODEL((モデル))
+
+    subgraph post [hook post の中]
+        direction TB
+        R[秘密情報をマスク] --> V[生の出力を vault に保存]
+        V --> L[transcript の usage からレベル決定]
+        L --> D{このセッションで見た?}
+        D -->|同じ| ONE[1 行]
+        D -->|変わった| DIFF[行の差分]
+        D -->|初見、予算超え| VIEW[テスト結果 · 目次 · diff 表 · 先頭/末尾]
+        D -->|初見、予算内| PASS[そのまま通す]
+    end
+    POST -.- post
+
+    MODEL -->|ctxgate show id --symbol / --grep| VAULT[(~/.ctxgate/store)]
+    V --> VAULT
+    L --> SESS[(~/.ctxgate/sessions<br/>journal · seen · tune · usage)]
+    CC -->|PreCompact / SessionStart| RECAP[ctxgate hook compact / session]
+    RECAP -->|vault の id 付き recap| MODEL
+    SESS --> RECAP
+```
+
+レベルはコンテキストウィンドウの埋まり具合で決まる:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    NORMAL: NORMAL<br/>繰り返しと永続化された出力以外は置き換えない
+    COMPRESS: COMPRESS ≥ 40%<br/>Bash > 8 KB、Read > 60 KB
+    AGGRESSIVE: AGGRESSIVE ≥ 60%<br/>Bash > 4 KB、Read > 24 KB、表示を短く
+    ISOLATE: ISOLATE ≥ 75%<br/>Bash > 3 KB、Read > 12 KB、表示は最小
+    [*] --> NORMAL
+    NORMAL --> COMPRESS
+    COMPRESS --> AGGRESSIVE
+    AGGRESSIVE --> ISOLATE
+    ISOLATE --> NORMAL: compaction
+```
+
+Grep と Glob はレベルの対象外。モデルに聞き直させ続ける種類の置き換え（*miss*）は、レベルに
+関係なくそのセッションの残りで緩める。
+
+## hook の役割
 
 - **PreToolUse** — rtk があれば Bash コマンドを渡す。要約が隠したものをモデルが取りに戻った
   呼び出し（*miss*）を記録し、miss が続く種類はそのセッションの残りで緩める。
