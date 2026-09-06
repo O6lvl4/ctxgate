@@ -480,6 +480,8 @@ instead of re-running the tool:
 Paged Reads (`offset`/`limit`) are never summarised. Ids may be abbreviated to a unique prefix.
 Change files with the Edit/Write tools, not shell patches: editing a file you have read from a
 script makes the harness re-send its diff into context on the next turn (ctxgate cannot catch that).
+If `peek` is installed, read code with it instead of cat / sed -n / awk: `peek <file> --symbol NAME`,
+`peek <file> --grep RE --around N`, `peek <file> --lines A-B`, `peek outline <file|dir>`, `peek grep RE [path]`.
 <!-- ctxgate:end -->
 """
 
