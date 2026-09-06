@@ -74,7 +74,7 @@ Restart Claude Code (or run `/hooks`). `ctxgate doctor` checks the setup.
 Optional:
 
 ```bash
-# symbol outlines for Rust / Go / TypeScript / Python (Almide is built in)
+# symbol outlines via tree-sitter: Rust, Go, TypeScript/TSX, Python, C, C++, Java, Ruby, C#, PHP, Bash, Lua, Kotlin, Swift, Scala (Almide is built in)
 git clone https://github.com/O6lvl4/ctxgate && cd ctxgate/tools/ctxgate-outline
 cargo build --release && cp target/release/ctxgate-outline ~/.local/bin/
 

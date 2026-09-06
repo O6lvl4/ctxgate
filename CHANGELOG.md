@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+- ctxgate-outline: 11 more tree-sitter grammars (C, C++, Java, Ruby, C#, PHP, Bash, Lua, Kotlin, Swift, Scala); keyword tokens no longer produce phantom symbols. Usable standalone as peek's `PEEK_OUTLINE_BIN`.
+- Generic head/tail view only for outputs over 12 KB and never for model-narrowed commands (grep / sed -n / awk / peek …).
+- The CLAUDE.md note recommends peek; hooks are registered globally by `init --global`.
+
 ## 0.11.0 — 2026-09-06
 - NORMAL is turn-safe: defaults Bash/Grep/Other 30 KB, Read 1 MB (only outputs Claude Code itself truncates, plus repeats, are replaced); levels are absolute (COMPRESS 8k/60k, AGGRESSIVE 4k/24k, ISOLATE 3k/12k for Bash/Read) and never touch Grep/Glob. n=3 Sonnet bench: 0.10 defaults were +13% worse; 0.11 is neutral on short tasks and −16% / −22% with the levels forced on the two long tasks, 3/3 success throughout.
 - `ctxgate report` now shows what actually fills the context window (since the last compaction): tool output vs harness attachments vs the model's own Write/Edit/Bash inputs. ctxgate governs only the first; the table makes a small saving number readable.

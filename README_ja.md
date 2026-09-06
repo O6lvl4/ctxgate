@@ -74,7 +74,7 @@ Claude Code を再起動するか `/hooks` を実行してください。`ctxgat
 任意で:
 
 ```bash
-# Rust / Go / TypeScript / Python のシンボル一覧（Almide は内蔵）
+# tree-sitter によるシンボル一覧: Rust, Go, TypeScript/TSX, Python, C, C++, Java, Ruby, C#, PHP, Bash, Lua, Kotlin, Swift, Scala（Almide は内蔵）
 git clone https://github.com/O6lvl4/ctxgate && cd ctxgate/tools/ctxgate-outline
 cargo build --release && cp target/release/ctxgate-outline ~/.local/bin/
 
