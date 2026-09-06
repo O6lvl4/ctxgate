@@ -142,6 +142,7 @@ and the total as the signal:
 
 Success was 5/5 in both modes. Two honest notes:
 
+- **Levels do not chase bytes.** Budget levels shrink what a summary shows (head/tail lines, outline length, stanza length) far more than they lower the size at which outputs get replaced, because a 3 KB output is cheaper inline than as a summary plus a retry. The self-tuning loop softens any kind that still misses.
 - **Turns dominate.** Every extra turn re-sends the whole context, so a compressed output that
   makes the model ask again costs more than the raw output would have. The first run of this
   benchmark was 6% *worse* than baseline for exactly that reason: paged Reads (`offset`/`limit`)

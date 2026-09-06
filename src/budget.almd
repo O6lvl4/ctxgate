@@ -73,31 +73,35 @@ fn usage_of(cfg: config.Config, used: Int) -> Usage = {
   Usage { used: used, window: cfg.window, pct: pct, level: level_of(cfg, pct) }
 }
 
-// Tighter knobs per level. Byte budgets shrink so more outputs get vaulted; what is shown
-// shrinks too. ISOLATE keeps almost nothing inline — the model must pull from the vault.
+// Tighter knobs per level. The principle (learned the hard way, see the bench notes in the
+// README): a replacement is only free if the model does not have to ask again, so levels do
+// NOT drag the byte thresholds down much — a 3 KB output is cheaper inline than as a summary
+// plus a retry. What they do is shrink what a replacement shows, cap outlines, and inject Grep
+// limits. Structured views (runner, git, outline) already lose little; the generic head/tail
+// view is where the lines go.
 fn apply(cfg: config.Config, level: Level) -> config.Config = match level {
   Normal => cfg,
   Compress => config.Config { ...cfg,
-    max_bash: cfg.max_bash / 2, max_read: cfg.max_read / 2, max_grep: cfg.max_grep / 2, max_other: cfg.max_other / 2,
-    head: int.max(8, cfg.head / 2), tail: int.max(8, cfg.tail / 2), salient: int.max(10, cfg.salient / 2),
-    outline_max: int.min(cfg.outline_max, 80), max_block: int.min(cfg.max_block, 14), grep_head_limit: 60,
+    max_bash: cfg.max_bash * 3 / 4, max_read: cfg.max_read * 3 / 4, max_grep: cfg.max_grep * 3 / 4, max_other: cfg.max_other * 3 / 4,
+    head: int.max(15, cfg.head * 2 / 3), tail: int.max(15, cfg.tail * 2 / 3), salient: int.max(20, cfg.salient * 2 / 3),
+    outline_max: int.min(cfg.outline_max, 90), max_block: int.min(cfg.max_block, 16), grep_head_limit: 80,
   },
   Aggressive => config.Config { ...cfg,
-    max_bash: cfg.max_bash / 4, max_read: cfg.max_read / 4, max_grep: cfg.max_grep / 4, max_other: cfg.max_other / 4,
-    head: 10, tail: 10, salient: 15, line_clip: int.min(cfg.line_clip, 140),
-    outline_max: 50, max_block: 10, grep_head_limit: 30,
+    max_bash: cfg.max_bash / 2, max_read: cfg.max_read / 2, max_grep: cfg.max_grep / 2, max_other: cfg.max_other / 2,
+    head: 15, tail: 15, salient: 20, line_clip: int.min(cfg.line_clip, 160),
+    outline_max: 60, max_block: 12, grep_head_limit: 50,
   },
   Isolate => config.Config { ...cfg,
-    max_bash: 1500, max_read: 1500, max_grep: 1500, max_other: 1500,
-    head: 6, tail: 6, salient: 8, line_clip: 120,
-    outline_max: 30, max_block: 6, grep_head_limit: 20,
+    max_bash: int.max(3000, cfg.max_bash / 3), max_read: int.max(8000, cfg.max_read / 3), max_grep: int.max(3000, cfg.max_grep / 3), max_other: int.max(3000, cfg.max_other / 3),
+    head: 10, tail: 10, salient: 12, line_clip: 140,
+    outline_max: 40, max_block: 8, grep_head_limit: 30,
   },
 }
 
 // One-line banner the model sees on every replaced output while squeezed (none when NORMAL).
 fn banner(u: Usage) -> Option[String] = match u.level {
   Normal => none,
-  _ => some("[ctxgate] context ${int.to_string(u.pct)}% of ${int.to_string(u.window / 1000)}k → ${level_name(u.level)}: outputs are trimmed harder; pull details from the vault only when needed."),
+  _ => some("[ctxgate] context ${int.to_string(u.pct)}% → ${level_name(u.level)} (summaries are shorter; fetch from the vault only when needed)"),
 }
 
 // ── session record ────────────────────────────────────────────────────────
@@ -233,7 +237,7 @@ test "apply tightens monotonically" {
   assert(c.max_bash < cfg.max_bash and a.max_bash < c.max_bash and i.max_bash < a.max_bash)
   assert(c.head <= cfg.head and a.head <= c.head and i.head <= a.head)
   assert_eq(apply(cfg, Normal).max_bash, cfg.max_bash)
-  assert_eq(i.grep_head_limit, 20)
+  assert_eq(i.grep_head_limit, 30)
 }
 
 test "banner only when squeezed" {
