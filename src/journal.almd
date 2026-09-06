@@ -9,6 +9,7 @@
 // hands the same text to the model right after a compaction.
 import fs
 import env
+import regex
 import self.config
 import self.vault
 import self.compress
@@ -47,7 +48,8 @@ effect fn tail(cfg: config.Config, sid: String, n: Int) -> List[String] = {
 // sentence), otherwise the size.
 fn summary_line(tool: String, label: String, id: String, rendered: String, bytes: Int) -> String = {
   let body = string.lines(rendered)
-    |> list.filter((l) => l != "" and not string.starts_with(l, "[ctxgate]") and not string.starts_with(l, "  ") and not string.starts_with(l, "──"))
+    |> list.filter((l) => l != "" and not string.starts_with(l, "[ctxgate]") and not string.starts_with(l, "  ") and not string.starts_with(l, "──")
+      and not regex.is_match("^ *[0-9]+│", l) and not string.contains(l, "⋮"))
   let gist = match list.first(body) {
     some(l) => compress.clip(string.trim(l), 110),
     none => "${compress.human_bytes(bytes)} vaulted",
