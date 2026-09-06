@@ -178,15 +178,15 @@ flowchart LR
 ```mermaid
 stateDiagram-v2
     direction LR
-    NORMAL: NORMAL<br/>繰り返しと永続化された出力以外は置き換えない
-    COMPRESS: COMPRESS ≥ 40%<br/>Bash > 8 KB、Read > 60 KB
-    AGGRESSIVE: AGGRESSIVE ≥ 60%<br/>Bash > 4 KB、Read > 24 KB、表示を短く
-    ISOLATE: ISOLATE ≥ 75%<br/>Bash > 3 KB、Read > 12 KB、表示は最小
     [*] --> NORMAL
-    NORMAL --> COMPRESS
-    COMPRESS --> AGGRESSIVE
-    AGGRESSIVE --> ISOLATE
+    NORMAL --> COMPRESS: 窓の 40%
+    COMPRESS --> AGGRESSIVE: 60%
+    AGGRESSIVE --> ISOLATE: 75%
     ISOLATE --> NORMAL: compaction
+    NORMAL: NORMAL — 繰り返しと永続化された出力だけ
+    COMPRESS: COMPRESS — Bash > 8 KB、Read > 60 KB
+    AGGRESSIVE: AGGRESSIVE — Bash > 4 KB、Read > 24 KB、表示を短く
+    ISOLATE: ISOLATE — Bash > 3 KB、Read > 12 KB、表示は最小
 ```
 
 Grep と Glob はレベルの対象外。モデルに聞き直させ続ける種類の置き換え（*miss*）は、レベルに

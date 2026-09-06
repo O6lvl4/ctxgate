@@ -175,15 +175,15 @@ Levels, driven by how full the window is:
 ```mermaid
 stateDiagram-v2
     direction LR
-    NORMAL: NORMAL<br/>nothing replaced except repeats and persisted output
-    COMPRESS: COMPRESS ≥ 40%<br/>Bash > 8 KB, Read > 60 KB
-    AGGRESSIVE: AGGRESSIVE ≥ 60%<br/>Bash > 4 KB, Read > 24 KB, shorter views
-    ISOLATE: ISOLATE ≥ 75%<br/>Bash > 3 KB, Read > 12 KB, minimal views
     [*] --> NORMAL
-    NORMAL --> COMPRESS
-    COMPRESS --> AGGRESSIVE
-    AGGRESSIVE --> ISOLATE
+    NORMAL --> COMPRESS: 40% of the window
+    COMPRESS --> AGGRESSIVE: 60%
+    AGGRESSIVE --> ISOLATE: 75%
     ISOLATE --> NORMAL: compaction
+    NORMAL: NORMAL — repeats and persisted output only
+    COMPRESS: COMPRESS — Bash > 8 KB, Read > 60 KB
+    AGGRESSIVE: AGGRESSIVE — Bash > 4 KB, Read > 24 KB, shorter views
+    ISOLATE: ISOLATE — Bash > 3 KB, Read > 12 KB, minimal views
 ```
 
 Grep and Glob are outside the levels entirely. A kind of replacement that keeps making the
