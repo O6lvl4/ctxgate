@@ -1,0 +1,74 @@
+[
+  {
+    "task": "recent-diff-review",
+    "mode": "off",
+    "run": 1,
+    "ok": true,
+    "in_tokens": 925079,
+    "out_tokens": 8520,
+    "cost_usd": 0.3751090000000001,
+    "turns": 15,
+    "ms": 106376,
+    "answer": "## `git diff HEAD~8 HEAD` — summary\n\nThese 8 topmost commits are merges that pull in several full feature branches, so the diff is much larger than \"8 commits\" suggests: **48 files changed, 8260 insertions(+), 2629 deletions(-)**.\n\nFiles changed (insertions/deletions):\n\n| File | +/- |\n|---|---|\n| `s"
+  },
+  {
+    "task": "recent-diff-review",
+    "mode": "off",
+    "run": 2,
+    "ok": true,
+    "in_tokens": 1079432,
+    "out_tokens": 6967,
+    "cost_usd": 0.3772238,
+    "turns": 17,
+    "ms": 97548,
+    "answer": "## `git diff HEAD~8 HEAD` — file summary\n\n| File | +/− |\n|---|---|\n| src/hooks/init.rs | +5508 / included in total −2629 (net largest single file) |\n| src/core/runner.rs | +918 (new file) |\n| src/cmds/js/bun_cmd.rs | +473 (new file) |\n| src/discover/registry.rs | +408 |\n| src/main.rs | +394 |\n| src/"
+  },
+  {
+    "task": "recent-diff-review",
+    "mode": "off",
+    "run": 3,
+    "ok": true,
+    "in_tokens": 649372,
+    "out_tokens": 4692,
+    "cost_usd": 0.2460012,
+    "turns": 11,
+    "ms": 67453,
+    "answer": "Here's the review of `git diff HEAD~8 HEAD`.\n\n## Files changed (insertions/deletions)\n\n| File | +/- |\n|---|---|\n| src/hooks/init.rs | +5508 |\n| src/core/runner.rs | +918 (new) |\n| tests/omp_init_test.rs | +861 (new) |\n| src/main.rs | +394 |\n| src/cmds/js/bun_cmd.rs | +473 (new) |\n| src/discover/regi"
+  },
+  {
+    "task": "recent-diff-review",
+    "mode": "on",
+    "run": 1,
+    "ok": true,
+    "in_tokens": 576661,
+    "out_tokens": 9308,
+    "cost_usd": 0.2843314,
+    "turns": 10,
+    "ms": 119503,
+    "answer": "## `git diff HEAD~8 HEAD` — files changed\n\n*(HEAD~8 lands on 8 first-parent merges: omp-shared, no-sudo-rewrite, golangci-lint-benchmark, lexer-consolidation, benchmark-find-disclosure, find-exit-code-and-hiddens, aeppling-patch-1, bun-deno-support)*\n\n| File | +/- |\n|---|---|\n| `.gitattributes` | +3"
+  },
+  {
+    "task": "recent-diff-review",
+    "mode": "on",
+    "run": 2,
+    "ok": true,
+    "in_tokens": 1240521,
+    "out_tokens": 8089,
+    "cost_usd": 0.4414814000000001,
+    "turns": 19,
+    "ms": 111402,
+    "answer": "## `git diff HEAD~8 HEAD --stat`\n\n48 files changed, 8260 insertions(+), 2629 deletions(-):\n\n| File | +/- |\n|---|---|\n| `src/hooks/init.rs` | +5508 (net, insertions+deletions combined in stat) |\n| `src/core/runner.rs` (new) | +918 |\n| `tests/omp_init_test.rs` (new) | +861 |\n| `src/discover/registry.r"
+  },
+  {
+    "task": "recent-diff-review",
+    "mode": "on",
+    "run": 3,
+    "ok": true,
+    "in_tokens": 390923,
+    "out_tokens": 6587,
+    "cost_usd": 0.2065338,
+    "turns": 7,
+    "ms": 78575,
+    "answer": "## `git diff HEAD~8 HEAD` — file changes\n\n| File | +/- |\n|---|---|\n| `src/hooks/init.rs` | +5508 / part of −2629 (dominant single file) |\n| `src/core/runner.rs` | +918 (new file) |\n| `tests/omp_init_test.rs` | +861 (new file) |\n| `src/discover/registry.rs` | +408 |\n| `src/cmds/js/bun_cmd.rs` | +473 "
+  }
+]

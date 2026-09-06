@@ -84,22 +84,25 @@ fn usage_of(cfg: config.Config, used: Int) -> Usage = {
 // summary that makes the model page for the rest costs a whole turn, and a turn re-sends the
 // entire window — far more than any summary saves while the window is small. The levels
 // tighten as the window fills, which is exactly when a saved byte is worth the most.
+// Grep/Glob are never tightened: a search result is what the model is looking for, and a
+// withheld match is a re-search (the forced-level bench failed 2/3 of a grep audit with
+// grep budgets of 3–4 KB and head_limit injected; the same task passed 3/3 without).
 fn apply(cfg: config.Config, level: Level) -> config.Config = match level {
   Normal => cfg,
   Compress => config.Config { ...cfg,
-    max_bash: int.min(cfg.max_bash, 8000), max_read: int.min(cfg.max_read, 60000), max_grep: int.min(cfg.max_grep, 8000), max_other: int.min(cfg.max_other, 10000),
+    max_bash: int.min(cfg.max_bash, 8000), max_read: int.min(cfg.max_read, 60000), max_other: int.min(cfg.max_other, 10000),
     head: int.max(15, cfg.head * 2 / 3), tail: int.max(15, cfg.tail * 2 / 3), salient: int.max(20, cfg.salient * 2 / 3),
-    outline_max: int.min(cfg.outline_max, 90), max_block: int.min(cfg.max_block, 16), grep_head_limit: 80,
+    outline_max: int.min(cfg.outline_max, 90), max_block: int.min(cfg.max_block, 16),
   },
   Aggressive => config.Config { ...cfg,
-    max_bash: int.min(cfg.max_bash, 4000), max_read: int.min(cfg.max_read, 24000), max_grep: int.min(cfg.max_grep, 4000), max_other: int.min(cfg.max_other, 5000),
+    max_bash: int.min(cfg.max_bash, 4000), max_read: int.min(cfg.max_read, 24000), max_other: int.min(cfg.max_other, 5000),
     head: 15, tail: 15, salient: 20, line_clip: int.min(cfg.line_clip, 160),
-    outline_max: 60, max_block: 12, grep_head_limit: 50,
+    outline_max: 60, max_block: 12,
   },
   Isolate => config.Config { ...cfg,
-    max_bash: int.min(cfg.max_bash, 3000), max_read: int.min(cfg.max_read, 12000), max_grep: int.min(cfg.max_grep, 3000), max_other: int.min(cfg.max_other, 3000),
+    max_bash: int.min(cfg.max_bash, 3000), max_read: int.min(cfg.max_read, 12000), max_other: int.min(cfg.max_other, 3000),
     head: 10, tail: 10, salient: 12, line_clip: 140,
-    outline_max: 40, max_block: 8, grep_head_limit: 30,
+    outline_max: 40, max_block: 8,
   },
 }
 
@@ -243,7 +246,8 @@ test "apply tightens monotonically" {
   assert(c.max_bash < cfg.max_bash and a.max_bash < c.max_bash and i.max_bash < a.max_bash)
   assert(c.head <= cfg.head and a.head <= c.head and i.head <= a.head)
   assert_eq(apply(cfg, Normal).max_bash, cfg.max_bash)
-  assert_eq(i.grep_head_limit, 30)
+  assert_eq(i.grep_head_limit, cfg.grep_head_limit)   // Grep is never tightened
+  assert_eq(i.max_grep, cfg.max_grep)
 }
 
 test "banner only when squeezed" {
