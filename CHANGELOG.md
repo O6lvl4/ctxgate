@@ -1,6 +1,7 @@
 # Changelog
 
 ## 0.10.0 — 2026-09-06
+- A generic replacement that would not shrink the output below 60% is skipped (the original passes through); shorter hint line; `ctxgate doctor`.
 - Budget levels re-tuned from dogfooding at 65%: thresholds fall to 3/4, 1/2, 1/3 (floors 3 KB / 8 KB) instead of 1/2, 1/4, 1.5 KB; views shrink to 15/15 and 10/10 lines instead of 10/10 and 6/6; shorter banner.
 - Self-tuning: recovery calls after a replacement are recorded as misses per replacement kind; kinds that keep missing are softened for the session. `ctxgate report`.
 - `init` writes a ctxgate block into CLAUDE.md (project, or ~/.claude/CLAUDE.md with --global).

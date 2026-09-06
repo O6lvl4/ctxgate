@@ -79,7 +79,7 @@ fn render(tool: String, label: String, id: String, s: Summary) -> String = {
   var out: List[String] = []
   list.push(out, "[ctxgate] ${tool} output: ${int.to_string(s.total_lines)} lines / ${human_bytes(s.bytes)} → vaulted as ctx:${id} (NOT in context).")
   if label != "" then list.push(out, "  source: ${clip(label, 220)}") else ()
-  list.push(out, "  retrieve: ctxgate show ${id} --grep <re> | --around <re> [n] | --lines A-B | --head N | --tail N")
+  list.push(out, "  full text: ctxgate show ${id} [--grep RE | --around RE N | --lines A-B | --tail N]")
   if list.is_empty(s.salient) then ()
   else {
     list.push(out, "── salient (${int.to_string(list.len(s.salient))}) ──")

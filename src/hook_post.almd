@@ -159,7 +159,7 @@ effect fn run(cfg: config.Config, raw: String, banner: String) -> Option[String]
         match vault_and_replace(cfg, j, tool, input, resp, shape, text, banner2) {
       ok(out) => some(out),
       err(e) => {
-        eprintln("[ctxgate] post hook fell back to original output: ${e}")
+        if e == "not worth replacing" then () else eprintln("[ctxgate] post hook fell back to original output: ${e}")
         none
       },
     }
@@ -276,18 +276,22 @@ effect fn vault_and_replace(cfg: config.Config, j: Value, tool: String, input: V
   let kind = if option.is_some(as_outline) then "read_outline"
     else if option.is_some(as_runner) then (if tool == "Bash" then "bash_summary" else if tool == "Glob" then "glob_tree" else "grep_group")
     else "generic"
-  tune.record_hit(cfg, json.get_string(j, "session_id") ?? "", kind, id, label) ?? ()
   let rendered = match as_outline {
     some(r) => r,
     none => match as_runner {
       some(r) => r,
       none => {
-      let p = profile_for(cfg, tool, persisted)
-      let summary = compress.summarize(text, p.head, p.tail, p.salient, p.clip)
+        let p = profile_for(cfg, tool, persisted)
+        let summary = compress.summarize(text, p.head, p.tail, p.salient, p.clip)
         compress.render(tool, label + read_window(resp), id, summary)
       },
     },
   }
+  // A replacement that barely shrinks the output is all risk (a possible retry) and no gain:
+  // leave the original in place. Persisted outputs are the exception — the model would only
+  // see a 2 KB preview of the raw text anyway.
+  guard persisted or string.len(rendered) * 10 < string.len(text) * 6 else err("not worth replacing")
+  tune.record_hit(cfg, json.get_string(j, "session_id") ?? "", kind, id, label) ?? ()
   journal.append(cfg, json.get_string(j, "session_id") ?? "", journal.summary_line(tool, label, id, rendered, string.len(text))) ?? ()
   let rendered_b = if banner == "" then rendered else banner + "\n" + rendered
   let updated = replace(resp, shape, rendered_b)!

@@ -12,6 +12,7 @@ import env
 import json
 import value
 import regex
+import process
 import self.config
 import self.compress
 import self.vault
@@ -36,6 +37,7 @@ usage:
   ctxgate status                     context budget of the latest session (usage, level, thresholds)
   ctxgate recall [N]                 recap of the session: files read, timeline of replaced outputs (for after a compaction)
   ctxgate report                     per-kind replacements vs misses (model asked again), what is softened, savings
+  ctxgate doctor                     check the installation: binaries, hooks, CLAUDE.md note, vault
   ctxgate init [--global]            add hooks to .claude/settings.json (or ~/.claude/settings.json)
   ctxgate gc [--days N] [--dry-run]  drop vault entries older than N days (default CTXGATE_RETAIN_DAYS=14)
   ctxgate path <id>                  print the raw file path
@@ -58,6 +60,7 @@ effect fn main() -> Unit = {
     "status" => if list.contains(args, "--line") then cmd_status_line(cfg, "") else cmd_status(cfg),
     "recall" => cmd_recall(cfg, list.get(args, 1) ?? "40"),
     "report" => cmd_report(cfg),
+    "doctor" => cmd_doctor(cfg),
     "statusline" => cmd_statusline(cfg),
     "init" => cmd_init(cfg, list.contains(args, "--global")),
     "gc" => cmd_gc(cfg, list.drop(args, 1), true),
@@ -509,4 +512,35 @@ effect fn cmd_report(cfg: config.Config) -> Unit = {
       println("  ${compress.pad_left("", 0)}${outline.pad_right(s.kind, 15)} ${compress.pad_left(int.to_string(s.hits), 4)}  ${compress.pad_left(int.to_string(s.misses), 6)}  ${if s.softened then "yes" else "no"}")
     }
   }
+}
+
+// ── doctor ────────────────────────────────────────────────────────────────
+effect fn cmd_doctor(cfg: config.Config) -> Unit = {
+  let say = (label: String, good: Bool, detail: String) => println("  ${if good then "✓" else "✗"} ${label}${if detail == "" then "" else "  — " + detail}")
+  println("ctxgate doctor")
+  let outline_ok = match process.exec_status_timeout(cfg.outline_bin, ["--help"], 3000) { ok(_) => true, err(_) => false }
+  say("outline helper (${cfg.outline_bin})", outline_ok, if outline_ok then "" else "Read outlines fall back to head/tail; build tools/ctxgate-outline")
+  let rtk_ok = cfg.rtk_bin != "" and (match process.exec_status_timeout(cfg.rtk_bin, ["--version"], 3000) { ok(st) => st.code == 0, err(_) => false })
+  say("rtk (${if cfg.rtk_bin == "" then "disabled" else cfg.rtk_bin})", rtk_ok or cfg.rtk_bin == "", if rtk_ok or cfg.rtk_bin == "" then "" else "optional; brew install rtk for the Bash command layer")
+  let cwd = env.cwd() ?? "."
+  let home_dir = env.get("HOME") ?? "."
+  let proj = match fs.read_text_if_exists("${cwd}/.claude/settings.json") { ok(some(t)) => t, _ => "" }
+  let glob = match fs.read_text_if_exists("${home_dir}/.claude/settings.json") { ok(some(t)) => t, _ => "" }
+  let hooks_ok = string.contains(proj, "ctxgate hook post") or string.contains(glob, "ctxgate hook post")
+  say("hooks registered", hooks_ok, if hooks_ok then (if string.contains(proj, "ctxgate hook post") then "project" else "global") else "run: ctxgate init  (or --global)")
+  let events = ["PreToolUse", "PostToolUse", "SessionStart", "PreCompact", "PostCompact"]
+  let settings = if string.contains(proj, "ctxgate hook") then proj else glob
+  let missing = list.filter(events, (e) => not string.contains(settings, "\"" + e + "\""))
+  if hooks_ok then say("all hook events", list.is_empty(missing), if list.is_empty(missing) then "" else "missing " + list.join(missing, ", ") + "; re-run ctxgate init") else ()
+  let md = match fs.read_text_if_exists("${cwd}/CLAUDE.md") { ok(some(t)) => t, _ => "" }
+  let md_g = match fs.read_text_if_exists("${home_dir}/.claude/CLAUDE.md") { ok(some(t)) => t, _ => "" }
+  let note_ok = string.contains(md, "ctxgate:begin") or string.contains(md_g, "ctxgate:begin")
+  say("CLAUDE.md note", note_ok, if note_ok then "" else "the model does not know about `ctxgate show`; run ctxgate init")
+  let probe = "${cfg.home}/.doctor"
+  let vault_ok = match fs.mkdir_p(cfg.home) { ok(_) => (match fs.write(probe, "ok") { ok(_) => true, err(_) => false }), err(_) => false }
+  if vault_ok then fs.remove(probe) ?? () else ()
+  say("vault writable (${cfg.home})", vault_ok, "")
+  let sl = match fs.read_text_if_exists("${home_dir}/.claude/statusline.sh") { ok(some(t)) => t, _ => "" }
+  say("status line segment", string.contains(sl, "ctxgate statusline"), if string.contains(sl, "ctxgate statusline") then "" else "optional; see README")
+  println("  window ${int.to_string(cfg.window / 1000)}k · levels ${int.to_string(cfg.lvl_compress)}/${int.to_string(cfg.lvl_aggressive)}/${int.to_string(cfg.lvl_isolate)}% · retain ${int.to_string(cfg.retain_days)}d · redact ${if cfg.redact then "on" else "off"}")
 }

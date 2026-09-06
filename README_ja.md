@@ -185,6 +185,7 @@ ctxgate stats                      累計: 退避したバイト数と見せた�
 ctxgate status                     現在のセッションの使用量と予算レベル
 ctxgate recall [N]                 セッションの要約: 読んだファイル、置換した出力の時系列
 ctxgate report                     種類別の置換数と miss、緩めているもの、節約量
+ctxgate doctor                     導入状態の点検（helper、rtk、hooks、CLAUDE.md、vault）
 ctxgate init [--global]            hook の登録
 ctxgate gc [--days N] [--dry-run]  N 日より古い vault エントリを削除
 ctxgate statusline                 ステータスライン用の 1 行（Claude Code のステータス JSON を stdin に）

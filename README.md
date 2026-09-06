@@ -212,6 +212,7 @@ ctxgate stats                      bytes vaulted vs bytes shown, all time
 ctxgate status                     context usage and budget level of the current session
 ctxgate recall [N]                 recap of the session: files read, timeline of replaced outputs
 ctxgate report                     replacements vs misses per kind, what is softened, savings
+ctxgate doctor                     check the installation (helper, rtk, hooks, CLAUDE.md note, vault)
 ctxgate init [--global]            register the hooks
 ctxgate gc [--days N] [--dry-run]  drop vault entries older than N days
 ctxgate statusline                 status-line segment (pipe Claude Code's status JSON in)
