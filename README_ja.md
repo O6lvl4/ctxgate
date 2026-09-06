@@ -1,311 +1,155 @@
 # ctxgate
 
-**Claude Code のための context firewall。**
-ツールの出力を生のままモデルに渡さない。まずローカルの vault に退避し、モデルには考えるのに十分な小ささの「見え方」だけを渡す。必要になれば、どの詳細でも取りに行ける。
-
-```
-Claude Code ── Bash · Read · Grep · Glob · WebFetch · MCP ──▶ ctxgate ──▶ モデル
-                                                                │
-                                                                ▼
-                                                     ~/.ctxgate/store  (raw, content-addressed)
-```
+Claude Code のコンテキスト・ファイアウォール。ツールの hook に入り、生の出力を全部ローカルの
+金庫に残した上で、モデルにどれだけ見せるかを決める。
 
 [English](README.md) · [Changelog](CHANGELOG.md)
 
----
+## やること
 
-## 問題
+1. **窓に余裕がある間は、何もしない。** モデルは ctxgate なしと同じ出力を見る。
+   計測済み: トークン数も答えも同じ。
+2. **窓が 40% 埋まったら、絞る。** 大きい Bash 出力、大きい Read、`git diff` を短い表示
+   （テストの結果、シンボル一覧、ファイル表）に置き換え、生の本文は id 付きで金庫に残す。
+   Sonnet での計測: 長いタスクで入力トークン 16〜22% 減、成功率は変わらず。
+3. **検索は絶対に絞らない。** Grep / Glob の結果はモデルが探しているものそのもの。
+   隠せば再検索になるだけ。
 
-エージェントのコンテキストウィンドウは作業記憶で、ツールはそこに「一度読めば二度と全文は要らないもの」を流し込む。400 行の `Compiling …`、関数ひとつが欲しかっただけの 5,000 行のソース、9 割が lockfile の `git diff`、同じファイルの 3 回目の Read。その全行が以降の全ターンで課金され、ウィンドウが埋まるほど、本来頼んだ仕事の精度が落ちる。
+レベルに関係なく常に効くもの:
 
-モデルに「節約して」と頼んでも効かない。モデルの外側で強制すれば効く。
-
-## ctxgate がやること
-
-ctxgate は Claude Code の hook として動く。ツール実行前（`PreToolUse`）にリクエストを書き換え、実行後（`PostToolUse`）にモデルが見るものを決める。守る規則は 4 つ、この順で。
-
-1. **何も失わない。** 大きな出力はまず content-addressed な vault に書く。モデルは常に id と、元の任意の断片を取り出す方法を知っている。
-2. **バイトではなく形を見せる。** ソースはシンボル表に、テスト実行は合計・失敗名・各失敗の stanza に、diff はファイル表と変更行に、再取得は 1 行に、編集後の再 Read は差分になる。
-3. **ウィンドウが埋まるほど強く絞る。** セッションの transcript から実トークン使用量を読み、4 段階で閾値を締める。誰も頼まなくても、最後の 3 割は守られる。
-4. **fail open。** 壊れた入力、無い helper、書けないディスク。どの場合も元の出力がそのまま通り、hook はエージェントを止めない。
-
-ctxgate の判断はすべてコードが下す。モデルには任せない。
+- **繰り返し** — 変わっていないファイルの再 Read、同じコマンドの再実行は 1 行になる。
+- **巨大な出力** — Claude Code 自身が 2 KB に切り詰める出力が、ちゃんとした要約になる。
+- **compaction 後の recall** — 何を見たかの時系列を金庫の id 付きで返す。
+- **秘密情報** — 認証情報らしき文字列はモデルに届く前にマスクする。
+- **report** — `ctxgate report` が窓を埋めているものの内訳を出す: ツール出力、ハーネスの添付、
+  自分の編集。ctxgate が縮められるのは最初の一つだけ。
 
 ## モデルが見るもの
 
-**テスト実行。** `cargo test --workspace` が 12 KB 吐いたとき、モデルが受け取るのは:
+絞っている時、12 KB の `cargo test` はこうなる:
 
 ```
 [ctxgate] cargo test output: 403 lines / 12 KB → vaulted as ctx:9258de38065e (NOT in context).
-  source: cargo test --workspace
-  full text: ctxgate show 9258de38065e --grep <re> | --around <re> [n] | --lines A-B
+  full text: ctxgate show 9258de38065e [--grep RE | --around RE N | --lines A-B | --tail N]
 cargo test: FAILED — 238 passed, 3 failed, 0 ignored
 failed:
   parser::match_nested
   wasm::rc_release
-  typecheck::generic_union
 ── parser::match_nested ──
   thread 'parser::match_nested' panicked at src/parser.rs:412:9:
   assertion `left == right` failed
-    left: Some(Expr::Match { arms: 2 })
-   right: Some(Expr::Match { arms: 3 })
 ```
 
-**大きなファイル。** 4,720 行の Rust（生で 64k トークン）の Read は目次になる:
+4,720 行の Rust ファイルは目次になり、シンボル 1 つを名前で取り出せる:
 
 ```
-[ctxgate] Read src/cmds/git/git.rs: 4720 lines, rust, 231 symbols → vaulted as ctx:b0c8c343b22f (NOT in context)
-  one symbol: ctxgate show b0c8c343b22f --symbol <name>   |   a range: Read offset=N limit=M
-── outline ──
+[ctxgate] Read src/cmds/git/git.rs: 4720 lines, rust, 231 symbols → vaulted as ctx:b0c8c343b22f
   enum    GitCommand                     L20-34
   fn      run_diff                       L112-216
-  struct  HunkHeader                     L500-508
-  fn      HunkHeader::consume            L530-550
   fn      compact_diff                   L648-821
   …
-  mod     tests                          L2657-4720
-  … 147 test symbols collapsed
+  mod     tests                          L2657-4720   (147 test symbols collapsed)
 ```
 
-**diff。** lockfile を含む 795 行の `git diff` は 39 行になる:
-
-```
-git diff: 8 files, +111 −113
-  M  src/lower.rs                       +3 −3      4 hunks
-  M  package-lock.json                  +100 −100  lockfile — hunks omitted
-  A  src/new.rs                         +5
-  R  src/rename_me.rs → src/renamed.rs
-── src/lower.rs @@ -3 +3 @@ fn f1() -> i32 { 1 } ──
-   fn f4() -> i32 { 4 }
-  -fn f5() -> i32 { 5 }
-  +fn f5() -> i32 { 500 } // changed
-   fn f6() -> i32 { 6 }
+```bash
+ctxgate show b0c8c343b22f --symbol run_diff
 ```
 
-**再取得。** 変わっていないファイルの 2 回目の Read:
+変わっていないファイルの 2 回目の Read は、どのレベルでも:
 
 ```
 [ctxgate] Read src/config.almd: unchanged since you last saw it this session (76 lines / 3 KB, ctx:4826ab3f8d38).
 ```
 
-もっと要るときは、要る分だけ取りに行く:
-
-```bash
-ctxgate show b0c8c343b22f --symbol compact_diff     # 関数ひとつを実ファイルから
-ctxgate show 9258de --around "rc_release" 20        # id は前方一致で省略可
-ctxgate show 9258de38065e --lines 180-220
-```
-
-## 数字
-
-ctxgate 自身を開発したセッションでの実測（Claude Code 2.1、1M トークンモデル）:
-
-| 状況 | 生 | モデルが見る量 |
-|---|---|---|
-| `cargo test`、403 行 | 12 KB | 1.1 KB |
-| 4,720 行の Rust の Read | 64k トークン | 6.9 KB の目次 |
-| `git diff`、8 ファイル（lockfile 込み） | 795 行 / 17 KB | 39 行 / 1.4 KB |
-| `seq 1 4000`（Claude Code が永続化） | 65 KB | 0.7 KB |
-| 同じファイルの 2 回目の Read | 3 KB | 1 行 |
-| 作業セッション 1 本の合計 | 195 KB（≈50k トークン）をウィンドウの外に | |
-
-hook のオーバーヘッドは 2.4 MB の transcript 読み込み込みで 1 回 20〜70 ms。サイズはバイト、トークンは rtk と同じく bytes / 4 の推定。
-
-セッション全体での削減率は、そのセッションが何でできているかで決まる。ctxgate が管轄するのは
-ツールの *出力* だけ。ハーネス自身の添付（ファイル変更通知、リマインダー、compaction 後に再添付
-されるファイル）と、モデル自身の Write/Edit/Bash 入力は hook を通らない。ゼロからコードを書く
-セッションは後者が大半で（ctxgate を作ったセッションはツール出力が窓の 22%）、累積入力の削減は
-1 割だった。読む・デバッグする・テストを回すセッションの方が効かせる余地は大きい。
-`ctxgate report` が今のセッションの内訳を出す。それが節約の上限なので、数字の読み方が分かる。
-
-### ベンチマーク（実トークン）
-
-`bench/bench.almd` は同じタスクを ctxgate あり/なしで `claude -p` に流し、新しい clone の中で
-JSON 結果から実際の usage を読む。rtk のコードベース（10 万行、1,700 コミット）での読み取り専用
-の探索タスク 5 つ、Sonnet、**各モード 3 回**、1 回あたりの平均入力トークンと turn 数。
-回ごとのばらつきが大きい（同じタスクが ctxgate なしでも 60 万〜100 万トークンの幅）ので、
-行ではなく合計を見ること。
-
-**0.10 の既定値（初手から Bash 8 KB / Read 24 KB / Grep 8 KB）:**
-
-| task | off: トークン / turn | on: トークン / turn |
-|---|---|---|
-| `main.rs`（4,190 行）を読んで構造を書く | 123,718 / 2.0 | 252,066 / 4.7 |
-| 4,720 行のファイルの `run_*` 関数を列挙 | 116,296 / 3.0 | 100,009 / 3.0 |
-| `git log --stat -60` のホットスポット | 216,778 / 4.3 | 234,868 / 4.7 |
-| `git diff HEAD~8 HEAD` のレビュー | 754,510 / 12.0 | 927,638 / 15.0 |
-| `src/` 全体の `.unwrap()` 監査（広い grep） | 897,388 / 24.0 | 873,964 / 22.0 |
-| **合計（15 回）** | **6,326,075 · $4.45** | **7,165,640 · $5.53（+13%）** |
-
-これは負け。原因は 1 行目で、モデルが丸ごと必要としていた Read を目次に置き換えたため
-ページ送りが発生し、2 turn が 4.7 turn になった。turn が増えるたびに窓全体が再送されるので、
-窓が小さいうちはどんな要約より 1 turn の方が高い。
-
-**0.11 の既定値（NORMAL は turn-safe、窓が埋まるにつれてレベルで絞る）:**
-
-| task | off: トークン / turn | on: トークン / turn |
-|---|---|---|
-| `main.rs`（4,190 行）を読んで構造を書く | 123,665 / 2.0 | 158,469 / 2.3 |
-| 4,720 行のファイルの `run_*` 関数を列挙 | 115,986 / 3.0 | 117,400 / 3.0 |
-| `git log --stat -60` のホットスポット | 217,477 / 4.3 | 166,547 / 3.3 |
-| `git diff HEAD~8 HEAD` のレビュー | 801,531 / 12.7 | 844,842 / 14.0 |
-| `src/` 全体の `.unwrap()` 監査（広い grep） | 1,029,726 / 42.7 | 1,150,982 / 36.0 |
-| **合計（15 回）** | **6,865,160 · $5.06 · 194 turn** | **7,314,729 · $4.76 · 178 turn（トークン +6%、費用 −6%、turn −8%）** |
-
-成功は両モード・両回とも 15/15。正直な読み方:
-
-- **短いタスクでは ctxgate は中立。設計どおり。** 窓が 40% を超えるまで何も置き換えないので、
-  そこに届く前に終わる `-p` 実行は素の Claude Code と同じに見える。2 つ目の表の差はノイズの範囲。
-- **モデルに聞き直させる要約は負ける。** 1 つ目の表がその証拠。だから 0.11 は窓に余裕がある間、
-  Claude Code 自身が切り詰める出力（30 KB 超で永続化される Bash 出力。素のままだとモデルは
-  2 KB しか見えない）と繰り返し（dedup）しか要約しない。
-- **節約が存在するのは窓が詰まった局面。** 長い 2 タスクを初手からレベル強制
-  （`CTXGATE_LVL_COMPRESS=0`、40% で AGGRESSIVE、60% で ISOLATE）で各モード 3 回、全て 3/3 成功:
-
-  | task（レベル強制） | off: トークン / turn | on: トークン / turn |
-  |---|---|---|
-  | `git diff HEAD~8 HEAD` のレビュー | 884,627 / 14.3 | 736,035 / 12.0（**−16%**） |
-  | `src/` 全体の `.unwrap()` 監査 | 1,007,046 / 39.7 | 785,173 / 23.3（**−22%**） |
-
-  grep 監査の 1 回目は 3 本中 2 本が失敗した（+179%、max-turns 到達）。レベルが Grep の予算も
-  絞って `head_limit` を注入していたためで、隠された検索結果は再検索になる。0.11 からレベルは
-  Grep/Glob に触らない。上の行はその再測定。つまり成り立つ形は「窓に余裕がある間は何もしない、
-  詰まったら Bash・Read・diff を絞る、検索は絶対に絞らない」。数字は全て Sonnet。他のモデルは未計測。
-
-自分で回すには: `almide run bench/bench.almd -- --repo <clone> --runs 3 --model sonnet`。
-
-## できること
-
-| | |
-|---|---|
-| **Vault** | content-addressed（`sha256` 接頭辞が id、同一内容の再退避はゼロコスト）。`show` の `--grep` / `--around` / `--lines` / `--head` / `--tail` / `--symbol`。`list`、`stats` |
-| **shape を保った置換** | Bash `stdout`、Read `file.content`、`content` / `text` / `output`、MCP の `content[]` 配列。同じ形で差し戻し、隣のフィールドは触らない |
-| **シンボル目次** | Rust / Go / TypeScript / TSX / JavaScript / Python は tree-sitter、Almide は自前パーサ。目次が溢れたらテストモジュールは 1 行に畳む |
-| **ランナー解析** | `cargo test` / `build` / `clippy`、`go test` / `build`、`pytest`、`vitest`、`jest`、`tsc`。コマンドから判定し、`make test` のような包みは出力の形から判定 |
-| **git** | `diff` / `show` / `log -p`: ファイル表と絞った hunk。lockfile・生成物・バイナリは stat のみ。`status` と `log` は 1 項目 1 行 |
-| **Context Budgeter** | transcript 末尾の `assistant.usage` から使用量を取得。ウィンドウは自動判定（`…[1m]` なら 1M、他は 200k）。NORMAL → COMPRESS 40% → AGGRESSIVE 60% → ISOLATE 75%。短くなった理由をバナー 1 行でモデルに伝える |
-| **セッション内 dedup** | 同一出力は 1 行。変更は行 diff（共通接頭辞・接尾辞を剥いで LCS）を前後 1 行付きで。Claude Code が compaction したらそのセッションの記憶を捨てる |
-| **Grep / Glob** | Grep の一致をファイルごとに件数付きでまとめ、サンプルを上限付きで見せる。Glob はディレクトリごとの件数と一部のファイル名に。全件は vault に残る |
-| **秘密情報** | 資格情報の形をした文字列（クラウドのキー、GitHub / Anthropic / OpenAI / Slack / Stripe のトークン、JWT、bearer、`PASSWORD=` 形式の代入、PEM 秘密鍵）を vault・dedup・モデルに渡す前に `[REDACTED:kind]` に伏せる。ctxgate が意図的に保存しない唯一のもの |
-| **保持期間** | `ctxgate gc` が 14 日（`CTXGATE_RETAIN_DAYS`）より古い vault とセッション記録を消す。hook が 1 日 1 回自動で実行するので、放置しても vault は肥大化しない |
-| **compaction をまたぐ記憶** | セッション日誌が置換 1 件につき 1 行を残す（`Bash cargo test → cargo test: FAILED — 238 passed, 3 failed  ctx:9258…`）。compaction は transcript の `isCompactSummary` 行と `PreCompact` / `PostCompact` hook で正確に検出し、dedup の記憶を捨て（「前に見た」と言わないため）、`compact` / `resume` の SessionStart hook で `ctxgate recall`（読んだファイル一覧 + 見たものの時系列 + vault id）をモデルに渡す。要約で何か落ちたと感じたら、モデル自身が `ctxgate recall` を呼べる |
-| **ステータスライン** | `ctxgate statusline` が Claude Code のステータスライン JSON を読み、正確なコンテキスト % をセッションに記録（Budgeter は新しい間それを優先）、`ctxgate COMPRESS 48% · saved 299 KB` を 1 行出す |
-| **自己調律** | 置換のせいでモデルが聞き直した（`ctxgate show`、再 Read、目次化したファイルへの Grep、4 分以内の同じコマンド）ら、その種類の置換に対する *miss* として記録する。miss が続く種類（直近で 3 回以上かつ 50% 以上）はセッションの残りで緩める: 閾値を上げる、行数を増やす、その表示を止める。`ctxgate report` で hit / miss / 緩めた種類が見える。指標はバイトではなく turn |
-| **モデルへの案内** | `init` が CLAUDE.md にマーカー付きの短いブロックを書く（再実行で更新）。`show --symbol`、`--grep`、`recall` を必要になる前に知っている状態にする |
-| **rtk 委譲** | [rtk](https://github.com/rtk-ai/rtk) があれば Bash コマンドを先に `rtk rewrite` に通し、rtk の allow / ask / deny 契約を守る。コマンド面は rtk、その上は ctxgate |
-| **Claude Code の実態に合わせた処理** | 30 KB 超の出力を Claude Code が永続化するファイルを読み、失敗検出を全文に効かせる。モデルにはその先頭 2 KB しか見えないことを知って描画する。ページ Read には `lines A-B of N` を付ける |
-| **CLI** | `ctxgate summarize "<cmd>" < output` で hook と同じ解析を CI や端末で使える |
-
 ## インストール
 
 ```bash
-almide install github.com/O6lvl4/ctxgate        # → ~/.local/bin/ctxgate
+almide install github.com/O6lvl4/ctxgate        # ネイティブバイナリ 1 つ → ~/.local/bin/ctxgate
+cd your-project && ctxgate init                 # .claude/settings.json に hook、CLAUDE.md に案内
+```
 
-# シンボル目次（任意。無ければ Read は head/tail 表示に落ちる）
+Claude Code を再起動（または `/hooks`）。`ctxgate doctor` で設定を確認できる。
+
+任意:
+
+```bash
+# Rust / Go / TypeScript / Python のシンボル目次（Almide は内蔵）
 git clone https://github.com/O6lvl4/ctxgate && cd ctxgate/tools/ctxgate-outline
 cargo build --release && cp target/release/ctxgate-outline ~/.local/bin/
 
-# Bash コマンド層（任意）
+# rtk: 入っていれば Bash コマンドを `rtk rewrite` に通す
 brew install rtk
-
-cd your-project && ctxgate init        # .claude/settings.json
-ctxgate init --global                  # または ~/.claude/settings.json
 ```
 
-Claude Code を再起動するか `/hooks` を実行。`init` は再実行時に自分のエントリを置き換えるので、アップグレードは `ctxgate init` をもう一度打つだけ。最初のツール呼び出しの後に `ctxgate status` で動作を確認できる。
+## 期待していい効果
 
-ctxgate は [Almide](https://github.com/almide/almide) で書かれている。`almide install` はランタイム不要の単一ネイティブバイナリ（約 800 KB）を作る。
+`bench/bench.almd` で計測: 同じタスクを ctxgate あり/なしで `claude -p` に流し、run ごとに
+新しい clone、JSON 結果の実 usage を読む。Sonnet、各モード 3 回。
+
+| 状況 | 入力トークン | 成功 |
+|---|---|---|
+| 短いタスク 5 つ、既定設定 | なしと同じ（±ノイズ） | 両方 15/15 |
+| `git diff` レビュー、窓が詰まった状態 | **−16%** | 両方 3/3 |
+| リポジトリ全体の `.unwrap()` 監査、窓が詰まった状態 | **−22%** | 両方 3/3 |
+
+数字から学んだこと 2 つ。既定値がこうなっている理由でもある:
+
+- **モデルに聞き直させる要約は負ける。** turn が増えるたびに窓全体が再送される。最初の既定値
+  （初手から絞る）は ctxgate なしより 13% *悪かった*。丸ごと必要な目次をモデルがページ送り
+  したから。だから、余裕がある間は何もしない。
+- **バイト数はトークン数ではない。** 「40% 節約」と出す道具は、自分が触った出力のバイト数を
+  数えている。モデルは回り道して（`git diff --no-compact`、もう一度 Read）結局同じ大きさの
+  窓になる。出力ではなく請求額を測ること。
+
+計測は Sonnet のみ。自分で回すには:
+
+```bash
+almide run bench/bench.almd -- --repo <clone> --runs 3 --model sonnet
+```
 
 ## コマンド
 
 ```
-ctxgate show <id> [--grep RE] [--around RE [N]] [--lines A-B] [--head N] [--tail N] [--symbol NAME]
-ctxgate outline <file>             ソースのシンボル表
-ctxgate summarize "<command>"      stdin → hook が出すのと同じ要約
-ctxgate list [N]                   最近の vault エントリ
-ctxgate stats                      累計: 退避したバイト数と見せたバイト数
-ctxgate status                     現在のセッションの使用量と予算レベル
-ctxgate recall [N]                 セッションの要約: 読んだファイル、置換した出力の時系列
-ctxgate report                     種類別の置換数と miss、緩めているもの、コンテキストを埋めているものの内訳
-ctxgate doctor                     導入状態の点検（helper、rtk、hooks、CLAUDE.md、vault）
-ctxgate init [--global]            hook の登録
-ctxgate gc [--days N] [--dry-run]  N 日より古い vault エントリを削除
-ctxgate statusline                 ステータスライン用の 1 行（Claude Code のステータス JSON を stdin に）
-ctxgate hook pre | post | session  hook 本体（stdin に JSON）
+ctxgate show <id> [--grep RE] [--around RE N] [--lines A-B] [--head N] [--tail N] [--symbol NAME]
+ctxgate recall [N]                 読んだファイル + 置換した出力の時系列（compaction の後に）
+ctxgate report                     置換、miss、窓を埋めているものの内訳
+ctxgate status                     今のセッションのコンテキスト使用率とレベル
+ctxgate list [N] · stats · gc      金庫
+ctxgate outline <file>             シンボル一覧
+ctxgate summarize "<command>"      stdin → hook が作る表示
+ctxgate init [--global] · doctor   セットアップ
+ctxgate statusline                 ステータスライン用の断片（Claude Code の status JSON を流し込む）
 ```
 
-ステータスラインに出すには、Claude Code が実行するスクリプトにこれを足す:
-
-```bash
-seg=$(printf '%s' "$input" | ctxgate statusline 2>/dev/null) && [[ -n "$seg" ]] && segments+=("$seg")
-```
+id は一意に決まる範囲で短くしてよい。
 
 ## 設定
 
-環境変数のみ。設定ファイルはない。
+環境変数のみ、設定ファイルはない。重要なもの:
 
-| 変数 | 既定 | 意味 |
+| 変数 | 既定 | |
 |---|---|---|
-| `CTXGATE_HOME` | `~/.ctxgate` | vault の場所 |
-| `CTXGATE_MAX_BASH` / `_READ` / `_GREP` / `_OTHER` | 30000 / 1000000 / 30000 / 30000 | NORMAL でこのバイト数を超えたら退避。レベルが上がると 8k/60k/8k/10k → 4k/24k/4k/5k → 3k/12k/3k/3k に下がる |
-| `CTXGATE_HEAD` / `CTXGATE_TAIL` | 30 / 30 | 汎用表示で両端に残す行数 |
-| `CTXGATE_SALIENT` | 40 | 拾う error 系行の上限 |
-| `CTXGATE_LINE_CLIP` | 200 | これより長い行は切る |
-| `CTXGATE_GREP_HEAD_LIMIT` | 60 | `head_limit` の無い Grep に注入する値 |
-| `CTXGATE_OUTLINE_BIN` / `CTXGATE_OUTLINE_MAX` | `ctxgate-outline` / 120 | 目次 helper と表示上限 |
-| `CTXGATE_MAX_BLOCK` | 20 | 失敗 stanza / hunk の行数上限 |
-| `CTXGATE_WINDOW` | 自動 | コンテキストウィンドウ（トークン） |
-| `CTXGATE_LVL_COMPRESS` / `_AGGRESSIVE` / `_ISOLATE` | 40 / 60 / 75 | 予算レベル（ウィンドウの %） |
-| `CTXGATE_DEDUP_MIN` | 600 | このバイト数以上を dedup 対象に（0 で無効） |
-| `CTXGATE_DIFF_MAX_CELLS` | 4,000,000 | 再 Read 差分の LCS 上限 |
-| `CTXGATE_RTK` / `CTXGATE_RTK_BIN` | 1 / `rtk` | rtk 委譲の on/off とバイナリ |
-| `CTXGATE_REDACT` | 1 | 資格情報の形をした文字列を伏せる（0 で無効） |
-| `CTXGATE_RETAIN_DAYS` | 14 | `gc` と 1 日 1 回の自動 gc の保持日数（0 で無期限） |
-| `CTXGATE_DEBUG` | | `1` で hook の生入力を `<home>/debug/` に保存 |
+| `CTXGATE_LVL_COMPRESS` / `_AGGRESSIVE` / `_ISOLATE` | 40 / 60 / 75 | 各レベルが始まる窓の % |
+| `CTXGATE_WINDOW` | auto | 窓のトークン数（モデル名に `[1m]` があれば 1M、なければ 200k） |
+| `CTXGATE_MAX_BASH` / `_READ` | 30000 / 1000000 | NORMAL で Bash / Read を置き換えるバイト数。レベルで 8k/60k、4k/24k、3k/12k に下がる |
+| `CTXGATE_REDACT` | 1 | 秘密情報のマスク（0 で無効） |
+| `CTXGATE_RETAIN_DAYS` | 14 | 金庫の保持日数（0 で無期限） |
+| `CTXGATE_RTK` | 1 | rtk 委譲（0 で無効） |
+| `CTXGATE_HOME` | `~/.ctxgate` | 金庫の場所 |
 
-## 比較
+その他: `CTXGATE_HEAD` / `_TAIL`（30）、`_SALIENT`（40）、`_LINE_CLIP`（200）、`_MAX_BLOCK`（20）、
+`_OUTLINE_MAX`（120）、`_DEDUP_MIN`（600）、`_MAX_GREP` / `_MAX_OTHER`（30000）。
 
-| | rtk | token-crunch | Claude Code 単体 | ctxgate |
-|---|---|---|---|---|
-| 範囲 | Bash コマンド | PostToolUse のテキスト | Read のキャップ、出力の永続化 | 全ツールの出力 + リクエスト |
-| 生の出力 | 捨てる（失敗時のみ tee） | 捨てる | 巨大な Bash だけ永続化 | 常に退避、常に取り出せる |
-| ソースファイル | `rtk read` のシグネチャ | 汎用の畳み込み | 25k トークンのキャップ | 完全なシンボル表と `--symbol` 取得 |
-| テスト / ビルド出力 | 100 超のコマンドフィルタ | 構造ヒューリスティック | なし | ランナー解析、コンパイルエラー対応 |
-| コンテキスト認識 | なし | compaction の促し | 自動 compaction | 4 段階の予算が全閾値を動かす |
-| 再取得 | なし | dedup | なし | dedup + 編集差分、compaction 対応 |
-| 併用 | ctxgate は rtk があれば Bash を委譲する | | | |
+## 仕組み
 
-rtk は成熟した Bash 層で、ctxgate は競合せずその上に乗る。
+- **PreToolUse** — rtk があれば Bash コマンドを渡す。要約が隠したものをモデルが取りに戻った
+  呼び出し（*miss*）を記録し、miss が続く種類はそのセッションの残りで緩める。
+- **PostToolUse** — 生の出力を `~/.ctxgate/store` に保存（内容アドレス）、セッションの transcript
+  から今のコンテキスト量を読んでレベルを決め、ツールが出したのと同じ JSON の形で表示を返す。
+- **PreCompact / SessionStart** — 繰り返しの記憶をリセットし、compaction 後に recap を渡す。
 
-## 設計
+表示の種類: `cargo test` / `go test` / `pytest` / `vitest` / `jest` / `tsc` の結果、`git diff` /
+`show` / `log` / `status`、tree-sitter のシンボル目次、Grep のファイル別まとめと Glob のツリー、
+汎用の先頭 / 末尾 / エラー行。hook のオーバーヘッドは 20〜70 ms。
 
-- **プロンプトではなく hook。** モデルが節約を思い出す必要はない。`PreToolUse updatedInput` がリクエストを、`PostToolUse updatedToolOutput` が結果を形作る。
-- **中核は純粋関数。** 各パーサ・レンダラは文字列に対する純粋関数で、それぞれに test ブロックと実フィクスチャがある。IO はその外側の薄い殻。
-- **Almide でない部品は 1 つ、境界は 1 枚。** シンボル目次は JSON を吐くだけの小さな Rust helper で、判断はしない。Almide 版 tree-sitter ができたら helper を差し替えるだけで、呼び出し側は変わらない。
-- **Claude Code の実態に合わせて測った。** hook のペイロード形状、30 KB の永続化規則、2 KB のプレビュー、25k の Read キャップ、transcript の形式は、ドキュメントではなく実セッションから採取した。
-
-```
-src/
-  hook_pre.almd    リクエスト整形: Grep head_limit、rtk 委譲
-  hook_post.almd   出力整形: shape 抽出、永続化ファイル、要約チェーン
-  vault.almd       store + index          budget.almd    Context Budgeter
-  compress.almd    汎用表示               dedup.almd     セッション記憶
-  outline.almd     シンボル表             textdiff.almd  行 diff
-  testout.almd     ランナー解析           gitout.almd    git
-tools/ctxgate-outline/   Rust + tree-sitter → {path, lang, total_lines, symbols:[{kind,name,start,end}]}
-```
-
-```bash
-almide check && almide test && almide build --release -o bin/ctxgate
-```
-
-## ロードマップ
-
-- ベンチマーク: 同じタスクを ctxgate あり・なしで走らせ、バイト推定ではなく実トークン数とタスク成功率で測る。
-- `init` が CLAUDE.md に短い使い方を書き、モデルが必要になる前に `show --symbol` を知っている状態にする。
-- Heavy Task Router: 探索的なツール連打を検知して subagent に振る。
-- Codex / Gemini CLI / Cursor の hook 形式。
-
-## ライセンス
-
-MIT または Apache-2.0、お好みで。
+[Almide](https://github.com/almide/almide) 製。MIT / Apache-2.0 のデュアルライセンス。
