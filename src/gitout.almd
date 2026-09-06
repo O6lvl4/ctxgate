@@ -45,7 +45,7 @@ fn name(k: Kind) -> String = match k {
 fn summarize(k: Kind, text: String, max_block: Int) -> Option[String] = match k {
   Diff => diff(text, max_block),
   Status => status(text),
-  Log => log(text),
+  Log => log_view(text),
   NotGit => none,
 }
 
@@ -253,7 +253,7 @@ fn join_cap(xs: List[String], max: Int) -> String =
 // ── log ───────────────────────────────────────────────────────────────────
 type Commit = { sha: String, author: String, date: String, subject: String, stat: String }
 
-fn log(text: String) -> Option[String] = {
+fn log_view(text: String) -> Option[String] = {
   let commits = segments(string.lines(text), (l) => regex.is_match("^commit [0-9a-f]+", l)) |> list.map(parse_commit)
   guard not list.is_empty(commits) else none
   let shown = list.take(commits, 60)
@@ -330,7 +330,7 @@ test "status fixture" {
 }
 
 test "log fixture: one line per commit, stat appended" {
-  let s = log(fs.read_text("tests/fixtures/git_log.txt")!) ?? ""
+  let s = log_view(fs.read_text("tests/fixtures/git_log.txt")!) ?? ""
   assert(string.contains(s, "git log: 2 commits"))
   assert(string.contains(s, "6b50c2c  2026-Sep-06  fx  second commit: tweak docs"))
   assert(string.contains(s, "initial import  [6 files changed, 685 insertions(+)]"))
@@ -339,5 +339,5 @@ test "log fixture: one line per commit, stat appended" {
 test "non-git text yields none" {
   assert(option.is_none(diff("hello", 20)))
   assert(option.is_none(status("hello")))
-  assert(option.is_none(log("hello")))
+  assert(option.is_none(log_view("hello")))
 }

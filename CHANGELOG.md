@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Symbol outlines now come from peek (github.com/O6lvl4/peek), an Almide git dependency; ctxgate's own Almide parser is gone and `ctxgate-outline` is handed to peek as its `PEEK_OUTLINE_BIN`-style provider. Module renamed outline → symbols (TocEntry / Toc) and gitout.log → log_view to avoid cross-package name clashes in Almide.
 - ctxgate-outline: 11 more tree-sitter grammars with dedicated rules (C, C++, Java, Ruby, C#, PHP, Bash, Lua, Kotlin, Swift, Scala), and every other language known to tree-sitter-language-pack (371) through a generic rule, with grammars downloaded on first use and cached (`TREE_SITTER_LANGUAGE_PACK_CACHE_DIR` overrides the location). `--languages`, `--fetch L…`, `--dump`. Keyword tokens no longer produce phantom symbols. Usable standalone as peek's `PEEK_OUTLINE_BIN`.
 - Generic head/tail view only for outputs over 12 KB and never for model-narrowed commands (grep / sed -n / awk / peek …).
 - The CLAUDE.md note recommends peek; hooks are registered globally by `init --global`.

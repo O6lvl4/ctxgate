@@ -18,7 +18,7 @@ import self.compress
 import self.vault
 import self.hook_pre
 import self.hook_post
-import self.outline
+import self.symbols
 import self.budget
 import self.journal
 import self.dedup
@@ -178,8 +178,8 @@ effect fn cmd_symbol(cfg: config.Config, id: String, name: String) -> Unit = {
     some(e) => e.label,
     none => err("vault entry ${id} is not a Read; --symbol needs a source file")!,
   }
-  let o = outline.of_file(cfg, path)!
-  let sym = match outline.find(o, name) {
+  let o = symbols.of_file(cfg, path)!
+  let sym = match symbols.find_entry(o, name) {
     some(s) => s,
     none => err("no symbol '${name}' in ${path} (try: ctxgate outline ${path})")!,
   }
@@ -193,9 +193,9 @@ effect fn cmd_symbol(cfg: config.Config, id: String, name: String) -> Unit = {
 
 effect fn cmd_outline(cfg: config.Config, path: String) -> Unit = {
   guard path != "" else err("usage: ctxgate outline <file>")
-  let o = outline.of_file(cfg, path)!
+  let o = symbols.of_file(cfg, path)!
   println("${path}: ${int.to_string(o.total_lines)} lines, ${o.lang}, ${int.to_string(list.len(o.symbols))} symbols")
-  for l in outline.render(o, 100000) { println(l) }
+  for l in symbols.render_toc(o, 100000) { println(l) }
 }
 
 effect fn cmd_path(cfg: config.Config, prefix: String) -> Unit = {
@@ -514,7 +514,7 @@ effect fn cmd_report(cfg: config.Config) -> Unit = {
   if list.is_empty(ss) then println("  no replacements observed yet") else {
     println("  kind            hits  misses  softened   (miss = the model asked again within ${int.to_string(tune.RECOVERY_SECS)}s)")
     for s in ss {
-      println("  ${compress.pad_left("", 0)}${outline.pad_right(s.kind, 15)} ${compress.pad_left(int.to_string(s.hits), 4)}  ${compress.pad_left(int.to_string(s.misses), 6)}  ${if s.softened then "yes" else "no"}")
+      println("  ${compress.pad_left("", 0)}${symbols.pad_r(s.kind, 15)} ${compress.pad_left(int.to_string(s.hits), 4)}  ${compress.pad_left(int.to_string(s.misses), 6)}  ${if s.softened then "yes" else "no"}")
     }
   }
   // Where the context actually goes — so a small saving can be read correctly.

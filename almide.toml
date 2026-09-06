@@ -2,3 +2,6 @@
 name = "ctxgate"
 version = "0.11.0"
 edition = "2026"
+
+[dependencies]
+peek = { git = "https://github.com/O6lvl4/peek" }

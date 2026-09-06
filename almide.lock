@@ -1,0 +1,3 @@
+# almide.lock — auto-generated, do not edit
+
+peek = { git = "https://github.com/O6lvl4/peek", ref = "main", commit = "b2253b13c0aac0d085ffeebc1fdc697b021e0f02" }

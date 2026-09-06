@@ -74,8 +74,9 @@ Restart Claude Code (or run `/hooks`). `ctxgate doctor` checks the setup.
 Optional:
 
 ```bash
-# symbol outlines via tree-sitter. 16 languages with dedicated rules built in; 371 more via
-# tree-sitter-language-pack, each grammar downloaded on first use (`ctxgate-outline --languages`)
+# tree-sitter outlines for the symbol views. Outlines come from peek (an Almide dependency,
+# fetched at build time); this helper is its provider for 16 languages with dedicated rules and
+# 371 more via tree-sitter-language-pack, downloaded on first use (`ctxgate-outline --languages`)
 git clone https://github.com/O6lvl4/ctxgate && cd ctxgate/tools/ctxgate-outline
 cargo build --release && cp target/release/ctxgate-outline ~/.local/bin/
 
@@ -156,7 +157,9 @@ model ask again (a *miss*) is softened for the rest of the session, whatever the
   for the rest of the session.
 - **PostToolUse** stores the raw output in `~/.ctxgate/store` (content-addressed), reads the
   current context size from the session transcript, picks the level, and returns a view in the
-  same JSON shape the tool produced.
+  same JSON shape the tool produced. Symbol outlines come from
+  [peek](https://github.com/O6lvl4/peek); `ctxgate-outline` is plugged into peek as its
+  tree-sitter provider.
 - **PreCompact / SessionStart** reset the repeat memory and hand the recap back after a
   compaction.
 

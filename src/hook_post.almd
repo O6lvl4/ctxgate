@@ -17,7 +17,7 @@ import fs
 import self.config
 import self.compress
 import self.vault
-import self.outline
+import self.symbols
 import self.testout
 import self.gitout
 import self.dedup
@@ -206,7 +206,7 @@ fn read_window(resp: Value) -> String = match value.field(resp, "file")? {
 // Returns none when the file has no outline (unknown language, helper missing, no symbols).
 effect fn read_as_outline(cfg: config.Config, path: String, id: String, resp: Value, text: String) -> Option[String] = {
   guard path != "" else none
-  match outline.of_file(cfg, path) {
+  match symbols.of_file(cfg, path) {
     err(_) => none,
     ok(o) => {
       guard not list.is_empty(o.symbols) else none
@@ -214,7 +214,7 @@ effect fn read_as_outline(cfg: config.Config, path: String, id: String, resp: Va
       list.push(out, "[ctxgate] Read ${path}: ${int.to_string(o.total_lines)} lines, ${o.lang}, ${int.to_string(list.len(o.symbols))} symbols → vaulted as ctx:${id} (NOT in context)${read_window(resp)}.")
       list.push(out, "  one symbol: ctxgate show ${id} --symbol <name>   |   a range: Read offset=N limit=M   |   search: ctxgate show ${id} --grep <re>")
       list.push(out, "── outline ──")
-      for l in outline.render(o, cfg.outline_max) { list.push(out, l) }
+      for l in symbols.render_toc(o, cfg.outline_max) { list.push(out, l) }
       let head = compress.summarize(text, 12, 0, 0, cfg.line_clip)
       list.push(out, "── head ──")
       for l in head.head { list.push(out, l) }

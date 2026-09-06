@@ -74,8 +74,9 @@ Claude Code を再起動するか `/hooks` を実行してください。`ctxgat
 任意で:
 
 ```bash
-# tree-sitter によるシンボル一覧。16 言語は専用ルールを内蔵、残り 371 言語は tree-sitter-language-pack
-# 経由で、初回使用時に grammar をダウンロード（`ctxgate-outline --languages` で一覧）
+# シンボル一覧は peek（Almide の依存として build 時に取得）が作る。このヘルパーはその provider で、
+# 16 言語は専用ルール、残り 371 言語は tree-sitter-language-pack 経由で初回使用時に grammar を取得
+#（`ctxgate-outline --languages` で一覧）
 git clone https://github.com/O6lvl4/ctxgate && cd ctxgate/tools/ctxgate-outline
 cargo build --release && cp target/release/ctxgate-outline ~/.local/bin/
 
@@ -163,7 +164,8 @@ id は、他と区別できる長さまで省略できます。
   取りに戻った呼び出し（*miss*）を記録し、miss が続く種類の置き換えはそのセッションの残りで緩めます。
 - **PostToolUse** — 生の出力を `~/.ctxgate/store` に保存し（内容のハッシュで管理）、セッションの
   transcript から現在のコンテキスト量を読んでレベルを決め、ツールが返したのと同じ JSON の形で
-  表示を返します。
+  表示を返します。シンボル一覧は [peek](https://github.com/O6lvl4/peek) が作り、`ctxgate-outline` は
+  peek の tree-sitter provider として差し込まれています。
 - **PreCompact / SessionStart** — 繰り返し検出の記憶をリセットし、compaction 後に recap を渡します。
 
 表示の種類: `cargo test` / `go test` / `pytest` / `vitest` / `jest` / `tsc` の結果、`git diff` /
