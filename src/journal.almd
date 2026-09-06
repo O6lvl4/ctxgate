@@ -1,0 +1,101 @@
+// journal — the session's timeline of what ctxgate replaced, one line each.
+//
+// Compaction keeps the story and drops the facts: which test was failing, which file had
+// 231 symbols, which vault id holds the diff. The journal keeps exactly those facts, in order:
+//   12:04  Bash  cargo test --workspace → cargo test: FAILED — 238 passed, 3 failed  ctx:9258de38065e
+//   12:05  Read  src/cmds/git/git.rs → 4720 lines, rust, 231 symbols  ctx:b0c8c343b22f
+//   ── compaction ──
+// `ctxgate recall` renders it (plus the working set of files) and the SessionStart hook
+// hands the same text to the model right after a compaction.
+import fs
+import env
+import self.config
+import self.vault
+import self.compress
+
+fn path(cfg: config.Config, sid: String) -> String = "${cfg.home}/sessions/${sid}.journal"
+
+fn hhmm(ts: Int) -> String = {
+  let s = ts % 86400
+  let h = s / 3600
+  let m = (s % 3600) / 60
+  (if h < 10 then "0" else "") + int.to_string(h) + ":" + (if m < 10 then "0" else "") + int.to_string(m)
+}
+
+effect fn append(cfg: config.Config, sid: String, line: String) -> Unit = {
+  guard sid != "" else ()
+  fs.mkdir_p("${cfg.home}/sessions")!
+  fs.append(path(cfg, sid), "${hhmm(env.unix_timestamp())}  ${line}\n")!
+}
+
+effect fn mark(cfg: config.Config, sid: String, what: String) -> Unit = {
+  guard sid != "" else ()
+  fs.mkdir_p("${cfg.home}/sessions")!
+  fs.append(path(cfg, sid), "── ${what} ──\n")!
+}
+
+effect fn tail(cfg: config.Config, sid: String, n: Int) -> List[String] = {
+  let lines: List[String] = match fs.read_lines_if_exists(path(cfg, sid)) {
+    ok(some(ls)) => ls,
+    _ => [],
+  }
+  list.drop(lines, int.max(0, list.len(lines) - n))
+}
+
+// The one line that goes in the journal for a replaced output: the summary's own first
+// non-header line when there is one (runner / git / outline / dedup verdicts all start with a
+// sentence), otherwise the size.
+fn summary_line(tool: String, label: String, id: String, rendered: String, bytes: Int) -> String = {
+  let body = string.lines(rendered)
+    |> list.filter((l) => l != "" and not string.starts_with(l, "[ctxgate]") and not string.starts_with(l, "  ") and not string.starts_with(l, "──"))
+  let gist = match list.first(body) {
+    some(l) => compress.clip(string.trim(l), 110),
+    none => "${compress.human_bytes(bytes)} vaulted",
+  }
+  "${tool}  ${compress.clip(label, 70)} → ${gist}  ctx:${id}"
+}
+
+// Files the model has read this session, newest first, one per path.
+effect fn working_set(cfg: config.Config, sid: String, n: Int) -> List[vault.Entry] = {
+  let es = vault.entries(cfg)! |> list.filter((e) => e.session == sid and e.tool == "Read")
+  var seen: List[String] = []
+  var out: List[vault.Entry] = []
+  for e in list.reverse(es) {
+    if list.contains(seen, e.label) or list.len(out) >= n then () else { list.push(seen, e.label); list.push(out, e) }
+  }
+  out
+}
+
+// The recap. Used by `ctxgate recall` and by the SessionStart(compact|resume) hook.
+effect fn recall(cfg: config.Config, sid: String, n: Int) -> Option[String] = {
+  let lines = tail(cfg, sid, n)!
+  let files = working_set(cfg, sid, 10)!
+  guard not list.is_empty(lines) or not list.is_empty(files) else none
+  var out: List[String] = []
+  list.push(out, "[ctxgate] recap of this session (raw outputs are in the vault; `ctxgate show <id> [--symbol NAME | --grep RE | --around RE N | --lines A-B]`; `ctxgate recall` prints this again)")
+  if not list.is_empty(files) then {
+    list.push(out, "── files read (newest first) ──")
+    for e in files { list.push(out, "  ${e.id}  ${compress.human_bytes(e.bytes)}  ${e.label}") }
+  } else ()
+  if not list.is_empty(lines) then {
+    list.push(out, "── timeline (last ${int.to_string(list.len(lines))}) ──")
+    for l in lines { list.push(out, "  " + l) }
+  } else ()
+  some(list.join(out, "\n"))
+}
+
+test "summary_line prefers the summary's first sentence" {
+  let r = "[ctxgate] cargo test output: 403 lines / 12 KB → vaulted as ctx:abc (NOT in context).\n  source: cargo test\ncargo test: FAILED — 238 passed, 3 failed\nfailed:\n  x"
+  let s = summary_line("Bash", "cargo test --workspace", "abc", r, 12000)
+  assert_eq(s, "Bash  cargo test --workspace → cargo test: FAILED — 238 passed, 3 failed  ctx:abc")
+}
+
+test "summary_line falls back to size" {
+  let s = summary_line("Read", "/a.rs", "id1", "[ctxgate] Read output: 10 lines\n── head ──\n  1│ x", 4096)
+  assert(string.contains(s, "4 KB vaulted"))
+}
+
+test "hhmm pads" {
+  assert_eq(hhmm(0), "00:00")
+  assert_eq(hhmm(3660), "01:01")
+}

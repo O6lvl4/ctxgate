@@ -170,7 +170,7 @@ Run it yourself: `almide run bench/bench.almd -- --repo <clone> --runs 3 --model
 | **Grep / Glob** | Grep matches grouped per file with counts and a capped sample; Glob results as a per-directory tree with counts. The full list stays in the vault |
 | **Secrets** | Credential-shaped strings (cloud keys, GitHub / Anthropic / OpenAI / Slack / Stripe tokens, JWTs, bearer tokens, `PASSWORD=` style assignments, PEM private keys) are masked as `[REDACTED:kind]` before the vault, the dedup store and the model. The one thing ctxgate deliberately does not preserve |
 | **Retention** | `ctxgate gc` drops vault entries and session records older than 14 days (`CTXGATE_RETAIN_DAYS`); hooks run it at most once a day, so the vault stays bounded without attention |
-| **Compaction memory** | A `SessionStart` hook on `compact` / `resume` hands the model a digest of this session's vault entries, so ids survive the summary Claude Code writes |
+| **Compaction memory** | A session journal keeps one line per replaced output (`Bash cargo test → cargo test: FAILED — 238 passed, 3 failed  ctx:9258…`). Compactions are detected exactly (the transcript's `isCompactSummary` line, plus `PreCompact` / `PostCompact` hooks): the dedup memory is reset so nothing is called "unchanged since you saw it", and a `SessionStart` hook on `compact` / `resume` hands the model `ctxgate recall`: the files it had read and the timeline of what it had seen, with vault ids. The model can run `ctxgate recall` itself whenever it feels the summary lost something |
 | **Status line** | `ctxgate statusline` reads Claude Code's status-line JSON, records the authoritative context percentage for the session (the Budgeter prefers it while fresh) and prints `ctxgate COMPRESS 48% · saved 299 KB` |
 | **rtk delegation** | With [rtk](https://github.com/rtk-ai/rtk) installed, Bash commands are rewritten through `rtk rewrite` first, honouring rtk's allow/ask/deny contract. rtk owns the command surface; ctxgate owns everything above it |
 | **Claude Code specifics** | Reads the file Claude Code persists for >30 KB outputs so failure detection covers the whole thing; knows the model only sees 2 KB of it and renders accordingly; annotates paged Reads with `lines A-B of N` |
@@ -207,6 +207,7 @@ ctxgate summarize "<command>"      stdin → the summary the hook would produce
 ctxgate list [N]                   recent vault entries
 ctxgate stats                      bytes vaulted vs bytes shown, all time
 ctxgate status                     context usage and budget level of the current session
+ctxgate recall [N]                 recap of the session: files read, timeline of replaced outputs
 ctxgate init [--global]            register the hooks
 ctxgate gc [--days N] [--dry-run]  drop vault entries older than N days
 ctxgate statusline                 status-line segment (pipe Claude Code's status JSON in)

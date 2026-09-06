@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.0 — 2026-09-06
+- Session journal: one line per replaced output (tool, label, the summary's first sentence, vault id); `ctxgate recall [N]` prints files read + timeline.
+- Exact compaction detection from the transcript (`isCompactSummary`) plus `PreCompact` / `PostCompact` hooks: dedup memory reset, journal divider. The usage-drop heuristic is gone.
+- `SessionStart(compact|resume)` now returns `recall` (files + timeline) instead of a bare id list.
+- Bench-driven fixes: paged Reads pass through untouched; Grep `head_limit` only under budget pressure and only in `content` mode; `CTXGATE_MAX_READ` default 24000.
+
 ## 0.8.0 — 2026-09-06
 - Grep results grouped per file with counts and a capped sample; Glob results as a per-directory tree (shapes taken from cli.js 2.1.x: Grep `content`, Glob `filenames`).
 - SessionStart hook (`compact|resume`): prints a digest of this session's vault entries so the model keeps its vault ids across compaction.

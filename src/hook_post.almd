@@ -23,6 +23,7 @@ import self.gitout
 import self.dedup
 import self.searchout
 import self.redact
+import self.journal
 
 type Shape =
   | Stdout
@@ -143,6 +144,7 @@ effect fn run(cfg: config.Config, raw: String, banner: String) -> Option[String]
             id: seen_id, ts: env.unix_timestamp(), session: sid, tool: tool, label: label,
             bytes: string.len(text), lines: compress.line_count(text), kept: string.len(view),
           }) ?? ()
+          journal.append(cfg, sid, journal.summary_line(tool, label, seen_id, view, string.len(text))) ?? ()
           some(envelope(updated))
         },
         err(_) => none,
@@ -278,6 +280,7 @@ effect fn vault_and_replace(cfg: config.Config, j: Value, tool: String, input: V
       },
     },
   }
+  journal.append(cfg, json.get_string(j, "session_id") ?? "", journal.summary_line(tool, label, id, rendered, string.len(text))) ?? ()
   let rendered_b = if banner == "" then rendered else banner + "\n" + rendered
   let updated = replace(resp, shape, rendered_b)!
   vault.record(cfg, vault.Entry {

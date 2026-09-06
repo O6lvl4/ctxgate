@@ -145,7 +145,7 @@ hook のオーバーヘッドは 2.4 MB の transcript 読み込み込みで 1 �
 | **Grep / Glob** | Grep の一致をファイルごとに件数付きでまとめ、サンプルを上限付きで見せる。Glob はディレクトリごとの件数と一部のファイル名に。全件は vault に残る |
 | **秘密情報** | 資格情報の形をした文字列（クラウドのキー、GitHub / Anthropic / OpenAI / Slack / Stripe のトークン、JWT、bearer、`PASSWORD=` 形式の代入、PEM 秘密鍵）を vault・dedup・モデルに渡す前に `[REDACTED:kind]` に伏せる。ctxgate が意図的に保存しない唯一のもの |
 | **保持期間** | `ctxgate gc` が 14 日（`CTXGATE_RETAIN_DAYS`）より古い vault とセッション記録を消す。hook が 1 日 1 回自動で実行するので、放置しても vault は肥大化しない |
-| **compaction をまたぐ記憶** | `compact` / `resume` の SessionStart hook で、そのセッションの vault 一覧をモデルに渡す。Claude Code の要約で id が消えない |
+| **compaction をまたぐ記憶** | セッション日誌が置換 1 件につき 1 行を残す（`Bash cargo test → cargo test: FAILED — 238 passed, 3 failed  ctx:9258…`）。compaction は transcript の `isCompactSummary` 行と `PreCompact` / `PostCompact` hook で正確に検出し、dedup の記憶を捨て（「前に見た」と言わないため）、`compact` / `resume` の SessionStart hook で `ctxgate recall`（読んだファイル一覧 + 見たものの時系列 + vault id）をモデルに渡す。要約で何か落ちたと感じたら、モデル自身が `ctxgate recall` を呼べる |
 | **ステータスライン** | `ctxgate statusline` が Claude Code のステータスライン JSON を読み、正確なコンテキスト % をセッションに記録（Budgeter は新しい間それを優先）、`ctxgate COMPRESS 48% · saved 299 KB` を 1 行出す |
 | **rtk 委譲** | [rtk](https://github.com/rtk-ai/rtk) があれば Bash コマンドを先に `rtk rewrite` に通し、rtk の allow / ask / deny 契約を守る。コマンド面は rtk、その上は ctxgate |
 | **Claude Code の実態に合わせた処理** | 30 KB 超の出力を Claude Code が永続化するファイルを読み、失敗検出を全文に効かせる。モデルにはその先頭 2 KB しか見えないことを知って描画する。ページ Read には `lines A-B of N` を付ける |
@@ -180,6 +180,7 @@ ctxgate summarize "<command>"      stdin → hook が出すのと同じ要約
 ctxgate list [N]                   最近の vault エントリ
 ctxgate stats                      累計: 退避したバイト数と見せたバイト数
 ctxgate status                     現在のセッションの使用量と予算レベル
+ctxgate recall [N]                 セッションの要約: 読んだファイル、置換した出力の時系列
 ctxgate init [--global]            hook の登録
 ctxgate gc [--days N] [--dry-run]  N 日より古い vault エントリを削除
 ctxgate statusline                 ステータスライン用の 1 行（Claude Code のステータス JSON を stdin に）

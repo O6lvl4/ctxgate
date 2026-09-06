@@ -14,6 +14,7 @@ import value
 import env
 import self.config
 import self.dedup
+import self.journal
 
 type Level =
   | Normal
@@ -35,6 +36,13 @@ fn level_of(cfg: config.Config, pct: Int) -> Level =
   else if pct >= cfg.lvl_aggressive then Aggressive
   else if pct >= cfg.lvl_compress then Compress
   else Normal
+
+// Compactions leave a `type:"user"` line with `"isCompactSummary":true`; counting them gives an
+// exact "has the model just forgotten everything" signal.
+effect fn compaction_count(path: String) -> Int = {
+  guard path != "" and fs.exists(path) else 0
+  list.count(fs.read_lines(path) ?? [], (l) => string.contains(l, "\"isCompactSummary\":true"))
+}
 
 // The transcript is JSONL; the last `assistant` line carrying `usage` is the current turn.
 // A compaction shows up naturally: the first turn after it has a much smaller prompt.
@@ -95,18 +103,22 @@ fn banner(u: Usage) -> Option[String] = match u.level {
 // ── session record ────────────────────────────────────────────────────────
 fn sessions_dir(cfg: config.Config) -> String = "${cfg.home}/sessions"
 
-effect fn record_usage(cfg: config.Config, session_id: String, u: Usage) -> Unit = {
+effect fn record_usage(cfg: config.Config, session_id: String, u: Usage, compactions: Int) -> Unit = {
   guard session_id != "" else ()
   fs.mkdir_p(sessions_dir(cfg))!
-  // A large drop in usage means Claude Code compacted: the model no longer remembers what
-  // it saw, so the dedup memory for this session must go too.
-  let prev_used = match fs.read_text_if_exists("${sessions_dir(cfg)}/${session_id}.json") {
-    ok(some(t)) => match json.parse(t) { ok(j) => json.get_int(j, "used") ?? 0, err(_) => 0 },
+  // A new compaction means the model no longer remembers what it saw: the dedup memory for
+  // this session must go, and the journal gets a divider so `recall` shows the boundary.
+  let prev_compactions = match fs.read_text_if_exists("${sessions_dir(cfg)}/${session_id}.json") {
+    ok(some(t)) => match json.parse(t) { ok(j) => json.get_int(j, "compactions") ?? 0, err(_) => 0 },
     _ => 0,
   }
-  if prev_used > 50_000 and u.used * 10 < prev_used * 7 then dedup.forget_session(cfg, session_id)! else ()
+  if compactions > prev_compactions then {
+    dedup.forget_session(cfg, session_id)!
+    journal.mark(cfg, session_id, "compaction #${int.to_string(compactions)}")!
+  } else ()
   fs.write("${sessions_dir(cfg)}/${session_id}.json", json.stringify(value.object([
     ("session", value.str(session_id)),
+    ("compactions", value.int(compactions)),
     ("used", value.int(u.used)),
     ("window", value.int(u.window)),
     ("pct", value.int(u.pct)),
@@ -157,7 +169,7 @@ effect fn effective(cfg: config.Config, raw_hook_input: String) -> (config.Confi
           some(p) => Usage { used: estimate.used, window: estimate.window, pct: p, level: level_of(cfg, p) },
           none => estimate,
         }
-        record_usage(cfg, sid, u) ?? ()
+        record_usage(cfg, sid, u, compaction_count(path) ?? 0) ?? ()
         (apply(cfg, u.level), some(u))
       },
     }

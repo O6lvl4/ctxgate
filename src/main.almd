@@ -19,6 +19,8 @@ import self.hook_pre
 import self.hook_post
 import self.outline
 import self.budget
+import self.journal
+import self.dedup
 
 let USAGE = """
 ctxgate — agent context firewall for Claude Code
@@ -31,6 +33,7 @@ usage:
   ctxgate list [N]                   last N vault entries (default 20)
   ctxgate stats                      totals: raw bytes vaulted vs bytes shown
   ctxgate status                     context budget of the latest session (usage, level, thresholds)
+  ctxgate recall [N]                 recap of the session: files read, timeline of replaced outputs (for after a compaction)
   ctxgate init [--global]            add hooks to .claude/settings.json (or ~/.claude/settings.json)
   ctxgate gc [--days N] [--dry-run]  drop vault entries older than N days (default CTXGATE_RETAIN_DAYS=14)
   ctxgate path <id>                  print the raw file path
@@ -51,10 +54,11 @@ effect fn main() -> Unit = {
     "list" => cmd_list(cfg, list.get(args, 1) ?? "20"),
     "stats" => cmd_stats(cfg),
     "status" => if list.contains(args, "--line") then cmd_status_line(cfg, "") else cmd_status(cfg),
+    "recall" => cmd_recall(cfg, list.get(args, 1) ?? "40"),
     "statusline" => cmd_statusline(cfg),
     "init" => cmd_init(cfg, list.contains(args, "--global")),
     "gc" => cmd_gc(cfg, list.drop(args, 1), true),
-    "version" | "--version" | "-V" => println("ctxgate 0.8.0"),
+    "version" | "--version" | "-V" => println("ctxgate 0.9.0"),
     _ => println(USAGE),
   }
 }
@@ -75,6 +79,7 @@ effect fn cmd_hook(base: config.Config, which: String) -> Unit = {
     "pre" => hook_pre.run(cfg, raw) ?? none,
     "post" => hook_post.run(cfg, raw, banner) ?? none,
     "session" => session_digest(cfg, raw) ?? none,
+    "compact" => { on_compact(cfg, raw) ?? (); none },
     _ => none,
   }
   match out {
@@ -235,7 +240,9 @@ fn merge_settings(settings: Value) -> Value = {
   let h1 = set(hooks, "PreToolUse", hook_entry("Bash|Grep", "pre"))
   let h2 = set(h1, "PostToolUse", hook_entry("Bash|Read|Grep|Glob|WebFetch|mcp__.*", "post"))
   let h3 = set(h2, "SessionStart", hook_entry("compact|resume", "session"))
-  value.merge(settings, value.object([("hooks", h3)]))
+  let h4 = set(h3, "PreCompact", hook_entry("", "compact"))
+  let h5 = set(h4, "PostCompact", hook_entry("", "compact"))
+  value.merge(settings, value.object([("hooks", h5)]))
 }
 
 effect fn cmd_init(cfg: config.Config, global: Bool) -> Unit = {
@@ -367,20 +374,30 @@ effect fn session_digest(cfg: config.Config, raw: String) -> Option[String] = {
   let sid = json.get_string(j, "session_id") ?? ""
   let source = json.get_string(j, "source") ?? ""
   guard sid != "" and (source == "compact" or source == "resume") else none
-  let es = vault.entries(cfg)! |> list.filter((e) => e.session == sid)
-  guard not list.is_empty(es) else none
-  // newest first, one line per distinct id
-  var seen_ids: List[String] = []
-  var recent: List[vault.Entry] = []
-  for e in list.reverse(es) {
-    if list.contains(seen_ids, e.id) or list.len(recent) >= 20 then () else { list.push(seen_ids, e.id); list.push(recent, e) }
+  journal.recall(cfg, sid, 30)!
+}
+
+// PreCompact / PostCompact: the model is about to forget (or just did). Reset the dedup
+// memory so nothing is reported as "unchanged since you saw it", and mark the journal.
+effect fn on_compact(cfg: config.Config, raw: String) -> Unit = {
+  let j = json.parse(raw) ?? value.object([])
+  let sid = json.get_string(j, "session_id") ?? ""
+  let ev = json.get_string(j, "hook_event_name") ?? "compact"
+  guard sid != "" else ()
+  dedup.forget_session(cfg, sid)!
+  journal.mark(cfg, sid, ev)!
+}
+
+effect fn cmd_recall(cfg: config.Config, n_str: String) -> Unit = {
+  let n = int.parse(n_str) ?? 40
+  let sid = match budget.latest_session(cfg) ?? none {
+    some(s) => json.get_string(s, "session") ?? "",
+    none => "",
   }
-  var out: List[String] = []
-  list.push(out, "[ctxgate] ${int.to_string(list.len(es))} tool outputs from this session are in the vault (raw text preserved). Retrieve any of them with `ctxgate show <id> [--symbol NAME | --grep RE | --around RE N | --lines A-B]`; `ctxgate status` shows the context budget.")
-  for e in recent {
-    list.push(out, "  ${e.id}  ${e.tool}  ${compress.human_bytes(e.bytes)}  ${compress.clip(e.label, 100)}")
+  match journal.recall(cfg, sid, n)! {
+    some(t) => println(t),
+    none => println("(nothing recorded for the latest session yet)"),
   }
-  some(list.join(out, "\n"))
 }
 
 // ── gc (retention) ────────────────────────────────────────────────────────
