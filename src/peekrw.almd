@@ -1,0 +1,159 @@
+// peekrw — rewrite shell reads of source files into peek calls (github.com/O6lvl4/peek).
+//
+// Agents told to use peek drift back to `grep -n`, `sed -n A,Bp`, `cat` within an hour. The
+// PreToolUse hook makes the choice for them: a Bash command whose segments read source files
+// with those tools is rewritten, segment by segment, into the equivalent peek call. Only shapes
+// whose meaning is identical are touched:
+//   grep [-n -r -R -E -e] RE <source paths…>   → peek grep 'RE' <paths…>
+//   sed -n A,Bp FILE                            → peek FILE --lines A-B
+//   cat FILE                                    → peek FILE
+//   head -N FILE  /  tail -N FILE               → peek FILE --head N / --tail N
+// Anything else in the segment (pipes after it, other flags, files under tmp / task logs,
+// patterns peek's regex cannot take) leaves the segment alone. Pure; tested on strings.
+import regex
+
+let SOURCE_EXT = ["rs", "almd", "go", "ts", "tsx", "js", "jsx", "py", "md", "toml", "yaml", "yml", "json", "lean", "c", "h", "cpp", "hpp", "java", "rb", "kt", "swift", "scala", "ex", "exs", "hs", "ml", "zig", "sh", "lua", "cs", "php", "sql", "proto"]
+let SKIP_PATH = ["/tmp/", "/private/", "tasks/", ".output", "$(", "`"]
+
+fn source_like(p: String) -> Bool = {
+  let ext = match string.last_index_of(p, ".") { some(i) => string.drop(p, i + 1), none => "" }
+  let bare = unquote(p)
+  not list.any(SKIP_PATH, (s) => string.contains(bare, s)) and (list.contains(SOURCE_EXT, ext) or not string.contains(bare, "."))
+}
+
+// ── tokenizer (quotes respected, quotes kept on the token) ────────────────
+fn tokens(seg: String) -> List[String] = {
+  var out: List[String] = []
+  var cur = ""
+  var q = ""
+  for ch in string.chars(seg) {
+    if q != "" then { cur = cur + ch; if ch == q then q = "" else () }
+    else if ch == "'" or ch == "\"" then { cur = cur + ch; q = ch }
+    else if ch == " " or ch == "\t" then { if cur != "" then { list.push(out, cur); cur = "" } else () }
+    else cur = cur + ch
+  }
+  if cur != "" then list.push(out, cur) else ()
+  out
+}
+
+fn unquote(t: String) -> String =
+  if string.len(t) >= 2 and ((string.starts_with(t, "'") and string.ends_with(t, "'")) or (string.starts_with(t, "\"") and string.ends_with(t, "\"")))
+  then string.slice(t, 1, string.len(t) - 1) else t
+
+fn squote(s: String) -> String = "'" + s + "'"
+
+// ── per-segment rewrites ─────────────────────────────────────────────────
+fn rw_grep(ts: List[String]) -> Option[String] = {
+  guard list.len(ts) >= 3 and (list.first(ts) ?? "") == "grep" else none
+  var pat = ""
+  var paths: List[String] = []
+  var bad = false
+  var expect_pat = false
+  for t in list.drop(ts, 1) {
+    if expect_pat then { pat = unquote(t); expect_pat = false }
+    else if string.starts_with(t, "-") then {
+      let flags = string.drop(t, 1)
+      if flags == "e" then expect_pat = true
+      else if flags != "" and list.all(string.chars(flags), (c) => c == "n" or c == "r" or c == "R" or c == "E") then ()
+      else bad = true
+    }
+    else if pat == "" then pat = unquote(t)
+    else list.push(paths, t)
+  }
+  guard not bad and pat != "" and not list.is_empty(paths) else none
+  guard not string.contains(pat, "\\b") and not string.contains(pat, "'") and not string.contains(pat, "$") else none
+  guard list.all(paths, (p) => source_like(p)) else none
+  some("peek grep ${squote(pat)} ${list.join(paths, " ")}")
+}
+
+fn rw_sed(ts: List[String]) -> Option[String] = {
+  guard list.len(ts) == 4 and (list.first(ts) ?? "") == "sed" and (list.get(ts, 1) ?? "") == "-n" else none
+  let range = unquote(list.get(ts, 2) ?? "")
+  let file = list.get(ts, 3) ?? ""
+  guard source_like(file) else none
+  match regex.captures("^([0-9]+),([0-9]+)p$", range) {
+    some(cs) => some("peek ${file} --lines ${list.get(cs, 1) ?? ""}-${list.get(cs, 2) ?? ""}"),
+    none => match regex.captures("^([0-9]+)p$", range) {
+      some(cs) => some("peek ${file} --lines ${list.get(cs, 1) ?? ""}-${list.get(cs, 1) ?? ""}"),
+      none => none,
+    },
+  }
+}
+
+fn rw_cat(ts: List[String]) -> Option[String] = {
+  guard list.len(ts) == 2 and (list.first(ts) ?? "") == "cat" else none
+  let file = list.get(ts, 1) ?? ""
+  guard source_like(file) and not string.starts_with(file, "-") else none
+  some("peek ${file}")
+}
+
+fn rw_headtail(ts: List[String]) -> Option[String] = {
+  let cmd = list.first(ts) ?? ""
+  guard cmd == "head" or cmd == "tail" else none
+  let (n, file) = if list.len(ts) == 3 and regex.is_match("^-[0-9]+$", list.get(ts, 1) ?? "") then (string.drop(list.get(ts, 1) ?? "", 1), list.get(ts, 2) ?? "")
+    else if list.len(ts) == 4 and (list.get(ts, 1) ?? "") == "-n" and regex.is_match("^[0-9]+$", list.get(ts, 2) ?? "") then (list.get(ts, 2) ?? "", list.get(ts, 3) ?? "")
+    else ("", "")
+  guard n != "" and source_like(file) else none
+  some("peek ${file} --${cmd} ${n}")
+}
+
+fn rw_segment(seg: String) -> Option[String] = {
+  // keep whatever follows the first pipe untouched
+  let (head, rest) = match string.index_of(seg, "|") { some(i) => (string.slice(seg, 0, i), string.drop(seg, i)), none => (seg, "") }
+  let lead = string.len(head) - string.len(string.trim_start(head))
+  let ts = tokens(string.trim(head))
+  let r = match rw_grep(ts) { some(x) => some(x), none => match rw_sed(ts) { some(x) => some(x), none => match rw_cat(ts) { some(x) => some(x), none => rw_headtail(ts) } } }
+  match r {
+    some(x) => some(string.repeat(" ", lead) + x + (if rest == "" then "" else " " + rest)),
+    none => none,
+  }
+}
+
+// ── whole command: split on ; && || and newlines outside quotes ───────────
+fn rewrite_reads(command: String) -> Option[String] = {
+  var out = ""
+  var seg = ""
+  var q = ""
+  var changed = false
+  var prev = ""
+  let flush = (s: String) => match rw_segment(s) { some(x) => x, none => s }
+  var pieces: List[String] = []
+  for ch in string.chars(command) {
+    if q != "" then { seg = seg + ch; if ch == q then q = "" else () }
+    else if ch == "'" or ch == "\"" then { seg = seg + ch; q = ch }
+    else if ch == ";" or ch == "\n" then { list.push(pieces, seg); list.push(pieces, ch); seg = "" }
+    else if (ch == "&" and prev == "&") or (ch == "|" and prev == "|") then { list.push(pieces, string.drop_end(seg, 1)); list.push(pieces, prev + ch); seg = "" }
+    else seg = seg + ch
+    prev = ch
+  }
+  list.push(pieces, seg)
+  for p in pieces {
+    if p == ";" or p == "\n" or p == "&&" or p == "||" then out = out + p
+    else { let r = flush(p); if r != p then changed = true else (); out = out + r }
+  }
+  if changed then some(out) else none
+}
+
+test "grep on source files becomes peek grep, pipes kept" {
+  assert_eq(rewrite_reads("grep -n 'fn apply' src/budget.almd | head -5"), some("peek grep 'fn apply' src/budget.almd | head -5"))
+  assert_eq(rewrite_reads("grep -rnE \"resolve_type_expr(_in)?\\(\" crates/almide-frontend/src"), some("peek grep 'resolve_type_expr(_in)?\\(' crates/almide-frontend/src"))
+  assert_eq(rewrite_reads("grep -c foo src/a.rs"), none)                       // -c changes the meaning
+  assert_eq(rewrite_reads("grep -n foo /private/tmp/x/tasks/b.output"), none)  // task logs are not source
+  assert_eq(rewrite_reads("grep -n 'foo\\b' src/a.rs"), none)                  // \\b unsupported
+}
+
+test "sed cat head tail" {
+  assert_eq(rewrite_reads("sed -n 12,28p crates/x/registration.rs"), some("peek crates/x/registration.rs --lines 12-28"))
+  assert_eq(rewrite_reads("sed -n '5p' a.rs"), some("peek a.rs --lines 5-5"))
+  assert_eq(rewrite_reads("cat src/main.almd"), some("peek src/main.almd"))
+  assert_eq(rewrite_reads("cat /private/tmp/x/tasks/b.output | tail -2"), none)
+  assert_eq(rewrite_reads("head -30 src/a.rs | cut -c1-160"), some("peek src/a.rs --head 30 | cut -c1-160"))
+  assert_eq(rewrite_reads("tail -n 20 src/a.rs"), some("peek src/a.rs --tail 20"))
+}
+
+test "compound commands: only the reading segments change" {
+  let cmd = "L=/x/land; cd $L; echo \"== helpers\"; grep -n 'fn helper' src/a.rs | head -3 && sed -n 10,20p src/b.rs"
+  assert_eq(rewrite_reads(cmd), some("L=/x/land; cd $L; echo \"== helpers\"; peek grep 'fn helper' src/a.rs | head -3 && peek src/b.rs --lines 10-20"))
+  assert_eq(rewrite_reads("cargo test --workspace 2>&1 | tail -3"), none)
+  assert_eq(rewrite_reads("echo 'grep -n x y.rs'"), none)
+}

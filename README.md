@@ -137,6 +137,7 @@ Environment variables, no config file. The ones that matter:
 | `CTXGATE_MAX_BASH` / `_READ` | 30000 / 1000000 | bytes before a Bash / Read output is replaced at NORMAL; levels lower them to 8k/60k, 4k/24k, 3k/12k |
 | `CTXGATE_REDACT` | 1 | mask secrets (0 disables) |
 | `CTXGATE_RETAIN_DAYS` | 14 | vault retention (0 keeps forever) |
+| `CTXGATE_PEEK` | 1 | rewrite source reads into peek (0 disables) |
 | `CTXGATE_RTK` | 1 | rtk delegation (0 disables) |
 | `CTXGATE_HOME` | `~/.ctxgate` | vault location |
 
@@ -152,7 +153,11 @@ model ask again (a *miss*) is softened for the rest of the session, whatever the
 
 ## Hooks
 
-- **PreToolUse** hands Bash commands to rtk when present, and notes when a call is the model
+- **PreToolUse** rewrites reads of source files into [peek](https://github.com/O6lvl4/peek)
+  calls when peek is installed (`grep -n RE files` → `peek grep`, `sed -n A,Bp FILE` →
+  `peek FILE --lines A-B`, `cat` / `head -N` / `tail -N` on a source file → `peek …`; only
+  shapes with identical meaning, task logs and tmp files untouched, `CTXGATE_PEEK=0` disables),
+  hands the rest of the Bash surface to rtk when present, and notes when a call is the model
   going back for something a summary withheld (a *miss*). Kinds that keep missing are softened
   for the rest of the session.
 - **PostToolUse** stores the raw output in `~/.ctxgate/store` (content-addressed), reads the
