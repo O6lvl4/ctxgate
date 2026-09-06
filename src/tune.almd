@@ -1,0 +1,132 @@
+// tune — the feedback loop: did a replacement make the model ask again?
+//
+// A "miss" is a recovery call right after a replacement: `ctxgate show …`, a paged Read of a
+// file we just outlined, a Grep on it, or the same command again. Misses cost a whole turn
+// (the entire context is re-sent), so they are the one metric that matters more than bytes.
+//
+//   <home>/sessions/<sid>.tune.jsonl   {"kind","event":"hit"|"miss","ts"}
+//   <home>/sessions/<sid>.last.json    the most recent replacement: {kind, id, label, ts}
+//
+// When a kind's miss rate over its recent history crosses the threshold, that kind is
+// softened for the rest of the session (bigger budgets, more lines, or the view is disabled).
+// `ctxgate report` shows the counts and what is currently softened.
+import fs
+import json
+import value
+import env
+import self.config
+
+let WINDOW = 12          // recent events per kind considered
+let MIN_MISSES = 3       // never soften on one bad call
+let MISS_PCT = 50        // soften when misses ≥ 50% of recent replacements of that kind
+let RECOVERY_SECS = 240  // a recovery call this soon after a replacement counts as a miss
+
+type Last = { kind: String, id: String, label: String, ts: Int }
+type Stat = { kind: String, hits: Int, misses: Int, softened: Bool }
+
+fn tune_path(cfg: config.Config, sid: String) -> String = "${cfg.home}/sessions/${sid}.tune.jsonl"
+fn last_path(cfg: config.Config, sid: String) -> String = "${cfg.home}/sessions/${sid}.last.json"
+
+effect fn record_hit(cfg: config.Config, sid: String, kind: String, id: String, label: String) -> Unit = {
+  guard sid != "" else ()
+  fs.mkdir_p("${cfg.home}/sessions")!
+  let ts = env.unix_timestamp()
+  fs.append(tune_path(cfg, sid), json.stringify(value.object([("kind", value.str(kind)), ("event", value.str("hit")), ("ts", value.int(ts))])) + "\n")!
+  fs.write(last_path(cfg, sid), json.stringify(value.object([("kind", value.str(kind)), ("id", value.str(id)), ("label", value.str(label)), ("ts", value.int(ts))])))!
+}
+
+effect fn last(cfg: config.Config, sid: String) -> Option[Last] = match fs.read_text_if_exists(last_path(cfg, sid)) {
+  ok(some(t)) => match json.parse(t) {
+    ok(j) => some(Last { kind: json.get_string(j, "kind") ?? "", id: json.get_string(j, "id") ?? "", label: json.get_string(j, "label") ?? "", ts: json.get_int(j, "ts") ?? 0 }),
+    err(_) => none,
+  },
+  _ => none,
+}
+
+// Is this tool call the model going back for what a replacement withheld?
+fn is_recovery(tool: String, input: Value, l: Last) -> Bool = {
+  let cmd = json.get_string(input, "command") ?? ""
+  let path = json.get_string(input, "file_path") ?? json.get_string(input, "path") ?? ""
+  if tool == "Bash" and (string.contains(cmd, "ctxgate show") or string.contains(cmd, "ctxgate recall")) then true
+  else if tool == "Bash" and cmd != "" and cmd == l.label then true                       // same command again
+  else if tool == "Read" and path != "" and path == l.label then true                      // re-read (paged or not)
+  else if tool == "Grep" and path != "" and string.starts_with(l.label, path) then true    // grep inside the outlined file
+  else false
+}
+
+// Called from PreToolUse: record a miss if this call recovers from the last replacement.
+effect fn observe_call(cfg: config.Config, sid: String, tool: String, input: Value) -> Unit = {
+  guard sid != "" else ()
+  match last(cfg, sid) ?? none {
+    none => (),
+    some(l) => {
+      guard env.unix_timestamp() - l.ts <= RECOVERY_SECS and is_recovery(tool, input, l) else ()
+      fs.append(tune_path(cfg, sid), json.stringify(value.object([("kind", value.str(l.kind)), ("event", value.str("miss")), ("ts", value.int(env.unix_timestamp()))])) + "\n")!
+      fs.remove(last_path(cfg, sid)) ?? ()   // one miss per replacement
+    },
+  }
+}
+
+effect fn stats(cfg: config.Config, sid: String) -> List[Stat] = {
+  let lines: List[String] = match fs.read_lines_if_exists(tune_path(cfg, sid)) {
+    ok(some(ls)) => ls,
+    _ => [],
+  }
+  let events = list.filter_map(lines, (l) => match json.parse(l) {
+    ok(j) => some((json.get_string(j, "kind") ?? "", json.get_string(j, "event") ?? "")),
+    err(_) => none,
+  })
+  var kinds: List[String] = []
+  for e in events { if list.contains(kinds, e.0) then () else list.push(kinds, e.0) }
+  list.map(kinds, (k) => {
+    let mine = list.filter(events, (e) => e.0 == k)
+    let recent = list.drop(mine, int.max(0, list.len(mine) - WINDOW))
+    let hits = list.count(recent, (e) => e.1 == "hit")
+    let misses = list.count(recent, (e) => e.1 == "miss")
+    Stat { kind: k, hits: hits, misses: misses, softened: misses >= MIN_MISSES and misses * 100 >= (hits + misses) * MISS_PCT }
+  })
+}
+
+fn softened_kinds(ss: List[Stat]) -> List[String] = list.filter(ss, (s) => s.softened) |> list.map((s) => s.kind)
+
+// Soften the config for kinds that keep missing. Pure.
+fn apply(cfg: config.Config, soft: List[String]) -> config.Config = {
+  let has = (k: String) => list.contains(soft, k)
+  config.Config { ...cfg,
+    max_read: if has("read_outline") then cfg.max_read * 3 else cfg.max_read,
+    max_bash: if has("bash_summary") or has("generic") then cfg.max_bash * 2 else cfg.max_bash,
+    max_grep: if has("grep_group") or has("glob_tree") then cfg.max_grep * 2 else cfg.max_grep,
+    max_block: if has("bash_summary") then cfg.max_block * 2 else cfg.max_block,
+    head: if has("generic") then cfg.head * 2 else cfg.head,
+    tail: if has("generic") then cfg.tail * 2 else cfg.tail,
+    dedup_min: if has("dedup") then 0 else cfg.dedup_min,
+  }
+}
+
+effect fn adjust(cfg: config.Config, sid: String) -> config.Config = {
+  guard sid != "" else cfg
+  apply(cfg, softened_kinds(stats(cfg, sid)!))
+}
+
+test "recovery detection" {
+  let l = Last { kind: "read_outline", id: "x", label: "/a/b.rs", ts: 0 }
+  assert(is_recovery("Read", value.object([("file_path", value.str("/a/b.rs")), ("offset", value.int(10))]), l))
+  assert(is_recovery("Bash", value.object([("command", value.str("ctxgate show x --symbol f"))]), l))
+  assert(is_recovery("Grep", value.object([("pattern", value.str("fn")), ("path", value.str("/a/b.rs"))]), l))
+  assert(not is_recovery("Read", value.object([("file_path", value.str("/a/c.rs"))]), l))
+}
+
+test "softening needs both a count and a rate" {
+  let cfg = config.Config {
+    home: "/tmp", max_bash: 8000, max_read: 24000, max_grep: 8000, max_other: 10000,
+    head: 30, tail: 30, salient: 40, line_clip: 200, grep_head_limit: 0,
+    outline_bin: "", outline_max: 120, max_block: 20, window: 200000, lvl_compress: 40, lvl_aggressive: 60, lvl_isolate: 75,
+    dedup_min: 600, diff_max_cells: 4_000_000, rtk_bin: "", redact: true, retain_days: 14, debug: false,
+  }
+  let soft = apply(cfg, ["read_outline", "dedup"])
+  assert_eq(soft.max_read, 72000)
+  assert_eq(soft.dedup_min, 0)
+  assert_eq(soft.max_bash, 8000)
+  let s = Stat { kind: "x", hits: 1, misses: 2, softened: false }
+  assert(not s.softened)
+}

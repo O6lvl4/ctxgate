@@ -147,6 +147,8 @@ hook のオーバーヘッドは 2.4 MB の transcript 読み込み込みで 1 �
 | **保持期間** | `ctxgate gc` が 14 日（`CTXGATE_RETAIN_DAYS`）より古い vault とセッション記録を消す。hook が 1 日 1 回自動で実行するので、放置しても vault は肥大化しない |
 | **compaction をまたぐ記憶** | セッション日誌が置換 1 件につき 1 行を残す（`Bash cargo test → cargo test: FAILED — 238 passed, 3 failed  ctx:9258…`）。compaction は transcript の `isCompactSummary` 行と `PreCompact` / `PostCompact` hook で正確に検出し、dedup の記憶を捨て（「前に見た」と言わないため）、`compact` / `resume` の SessionStart hook で `ctxgate recall`（読んだファイル一覧 + 見たものの時系列 + vault id）をモデルに渡す。要約で何か落ちたと感じたら、モデル自身が `ctxgate recall` を呼べる |
 | **ステータスライン** | `ctxgate statusline` が Claude Code のステータスライン JSON を読み、正確なコンテキスト % をセッションに記録（Budgeter は新しい間それを優先）、`ctxgate COMPRESS 48% · saved 299 KB` を 1 行出す |
+| **自己調律** | 置換のせいでモデルが聞き直した（`ctxgate show`、再 Read、目次化したファイルへの Grep、4 分以内の同じコマンド）ら、その種類の置換に対する *miss* として記録する。miss が続く種類（直近で 3 回以上かつ 50% 以上）はセッションの残りで緩める: 閾値を上げる、行数を増やす、その表示を止める。`ctxgate report` で hit / miss / 緩めた種類が見える。指標はバイトではなく turn |
+| **モデルへの案内** | `init` が CLAUDE.md にマーカー付きの短いブロックを書く（再実行で更新）。`show --symbol`、`--grep`、`recall` を必要になる前に知っている状態にする |
 | **rtk 委譲** | [rtk](https://github.com/rtk-ai/rtk) があれば Bash コマンドを先に `rtk rewrite` に通し、rtk の allow / ask / deny 契約を守る。コマンド面は rtk、その上は ctxgate |
 | **Claude Code の実態に合わせた処理** | 30 KB 超の出力を Claude Code が永続化するファイルを読み、失敗検出を全文に効かせる。モデルにはその先頭 2 KB しか見えないことを知って描画する。ページ Read には `lines A-B of N` を付ける |
 | **CLI** | `ctxgate summarize "<cmd>" < output` で hook と同じ解析を CI や端末で使える |
@@ -181,6 +183,7 @@ ctxgate list [N]                   最近の vault エントリ
 ctxgate stats                      累計: 退避したバイト数と見せたバイト数
 ctxgate status                     現在のセッションの使用量と予算レベル
 ctxgate recall [N]                 セッションの要約: 読んだファイル、置換した出力の時系列
+ctxgate report                     種類別の置換数と miss、緩めているもの、節約量
 ctxgate init [--global]            hook の登録
 ctxgate gc [--days N] [--dry-run]  N 日より古い vault エントリを削除
 ctxgate statusline                 ステータスライン用の 1 行（Claude Code のステータス JSON を stdin に）

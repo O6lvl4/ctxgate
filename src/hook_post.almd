@@ -24,6 +24,7 @@ import self.dedup
 import self.searchout
 import self.redact
 import self.journal
+import self.tune
 
 type Shape =
   | Stdout
@@ -145,12 +146,15 @@ effect fn run(cfg: config.Config, raw: String, banner: String) -> Option[String]
             bytes: string.len(text), lines: compress.line_count(text), kept: string.len(view),
           }) ?? ()
           journal.append(cfg, sid, journal.summary_line(tool, label, seen_id, view, string.len(text))) ?? ()
+          tune.record_hit(cfg, sid, "dedup", seen_id, label) ?? ()
           some(envelope(updated))
         },
         err(_) => none,
       },
       none => {
-        let budget = config.budget_for(cfg, tool)
+        // rtk already compressed this command's output: only intervene when it is still big
+        let via_rtk = tool == "Bash" and string.starts_with(string.trim(label), "rtk ")
+        let budget = config.budget_for(cfg, tool) * (if via_rtk then 2 else 1)
         guard string.len(text) > budget else none
         match vault_and_replace(cfg, j, tool, input, resp, shape, text, banner2) {
       ok(out) => some(out),
@@ -269,6 +273,10 @@ effect fn vault_and_replace(cfg: config.Config, j: Value, tool: String, input: V
   let paged = option.is_some(json.get_int(input, "offset")) or option.is_some(json.get_int(input, "limit"))
   let as_outline = if tool == "Read" and not paged then read_as_outline(cfg, label, id, resp, text) ?? none else none
   let as_runner = if tool == "Bash" then bash_as_runner(cfg, label, id, text) else search_view(cfg, tool, shape, label, id, text)
+  let kind = if option.is_some(as_outline) then "read_outline"
+    else if option.is_some(as_runner) then (if tool == "Bash" then "bash_summary" else if tool == "Glob" then "glob_tree" else "grep_group")
+    else "generic"
+  tune.record_hit(cfg, json.get_string(j, "session_id") ?? "", kind, id, label) ?? ()
   let rendered = match as_outline {
     some(r) => r,
     none => match as_runner {

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.0 — 2026-09-06
+- Self-tuning: recovery calls after a replacement are recorded as misses per replacement kind; kinds that keep missing are softened for the session. `ctxgate report`.
+- `init` writes a ctxgate block into CLAUDE.md (project, or ~/.claude/CLAUDE.md with --global).
+- Bash outputs that already went through rtk get a doubled budget before ctxgate intervenes again.
+
 ## 0.9.0 — 2026-09-06
 - Session journal: one line per replaced output (tool, label, the summary's first sentence, vault id); `ctxgate recall [N]` prints files read + timeline.
 - Exact compaction detection from the transcript (`isCompactSummary`) plus `PreCompact` / `PostCompact` hooks: dedup memory reset, journal divider. The usage-drop heuristic is gone.

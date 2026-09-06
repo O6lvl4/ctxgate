@@ -21,6 +21,7 @@ import self.outline
 import self.budget
 import self.journal
 import self.dedup
+import self.tune
 
 let USAGE = """
 ctxgate — agent context firewall for Claude Code
@@ -34,6 +35,7 @@ usage:
   ctxgate stats                      totals: raw bytes vaulted vs bytes shown
   ctxgate status                     context budget of the latest session (usage, level, thresholds)
   ctxgate recall [N]                 recap of the session: files read, timeline of replaced outputs (for after a compaction)
+  ctxgate report                     per-kind replacements vs misses (model asked again), what is softened, savings
   ctxgate init [--global]            add hooks to .claude/settings.json (or ~/.claude/settings.json)
   ctxgate gc [--days N] [--dry-run]  drop vault entries older than N days (default CTXGATE_RETAIN_DAYS=14)
   ctxgate path <id>                  print the raw file path
@@ -55,10 +57,11 @@ effect fn main() -> Unit = {
     "stats" => cmd_stats(cfg),
     "status" => if list.contains(args, "--line") then cmd_status_line(cfg, "") else cmd_status(cfg),
     "recall" => cmd_recall(cfg, list.get(args, 1) ?? "40"),
+    "report" => cmd_report(cfg),
     "statusline" => cmd_statusline(cfg),
     "init" => cmd_init(cfg, list.contains(args, "--global")),
     "gc" => cmd_gc(cfg, list.drop(args, 1), true),
-    "version" | "--version" | "-V" => println("ctxgate 0.9.0"),
+    "version" | "--version" | "-V" => println("ctxgate 0.10.0"),
     _ => println(USAGE),
   }
 }
@@ -69,7 +72,10 @@ effect fn cmd_hook(base: config.Config, which: String) -> Unit = {
   let raw = io.read_all()
   vault.debug_dump(base, which, raw) ?? ()
   // Context Budgeter: tighten the config as the window fills; banner tells the model why.
-  let (cfg, usage) = budget.effective(base, raw) ?? (base, none)
+  let (cfg0, usage) = budget.effective(base, raw) ?? (base, none)
+  // self-tuning: kinds of replacement that made the model ask again are softened
+  let sid0 = match json.parse(raw) { ok(j) => json.get_string(j, "session_id") ?? "", err(_) => "" }
+  let cfg = tune.adjust(cfg0, sid0) ?? cfg0
   let banner = match usage {
     some(u) => budget.banner(u) ?? "",
     none => "",
@@ -256,6 +262,7 @@ effect fn cmd_init(cfg: config.Config, global: Bool) -> Unit = {
   if had_file then fs.copy(path, "${path}.bak")! else ()
   fs.write(path, json.stringify_pretty(merged) + "\n")!
   println("ctxgate hooks written to ${path}" + (if had_file then " (backup: ${path}.bak)" else ""))
+  write_claude_md(if global then "${env.get("HOME") ?? "."}/.claude/CLAUDE.md" else "${env.cwd()!}/CLAUDE.md")!
   println("vault: ${cfg.home}")
   println("restart Claude Code (or /hooks) to pick them up; verify with: ctxgate stats")
 }
@@ -450,4 +457,56 @@ effect fn auto_gc(cfg: config.Config) -> Unit = {
   fs.mkdir_p(cfg.home)!
   fs.write(marker, int.to_string(env.unix_timestamp()))!
   cmd_gc(cfg, [], false)!
+}
+
+// ── CLAUDE.md note ────────────────────────────────────────────────────────
+// The model has to know the vault exists before it needs it. `init` adds (or refreshes) one
+// short block between markers; everything else in the file is untouched.
+let CLAUDE_MD_BEGIN = "<!-- ctxgate:begin -->"
+let CLAUDE_MD_END = "<!-- ctxgate:end -->"
+let CLAUDE_MD_BLOCK = """
+<!-- ctxgate:begin -->
+## ctxgate (context firewall)
+Large tool outputs are replaced by a summary; the raw text is kept in a local vault and the
+summary names its id (`ctx:<id>`). When a summary is not enough, fetch exactly what you need
+instead of re-running the tool:
+- `ctxgate show <id> --symbol <name>` one function/type from a file whose outline you saw
+- `ctxgate show <id> --grep <re>` / `--around <re> <n>` / `--lines A-B` / `--tail N` a slice of any vaulted output
+- `ctxgate recall` files you read and the timeline of what you saw (use after a context compaction)
+Paged Reads (`offset`/`limit`) are never summarised. Ids may be abbreviated to a unique prefix.
+<!-- ctxgate:end -->
+"""
+
+effect fn write_claude_md(path: String) -> Unit = {
+  let current = match fs.read_text_if_exists(path) { ok(some(t)) => t, _ => "" }
+  let block = string.trim(CLAUDE_MD_BLOCK)
+  let next = match (string.index_of(current, CLAUDE_MD_BEGIN), string.index_of(current, CLAUDE_MD_END)) {
+    (some(a), some(b)) => string.slice(current, 0, a) + block + string.drop(current, b + string.len(CLAUDE_MD_END)),
+    _ => (if current == "" then "" else string.trim(current) + "\n\n") + block + "\n",
+  }
+  if next == current then () else {
+    fs.write(path, next)!
+    println("ctxgate note written to ${path}")
+  }
+}
+
+// ── report ────────────────────────────────────────────────────────────────
+effect fn cmd_report(cfg: config.Config) -> Unit = {
+  let sid = match budget.latest_session(cfg) ?? none {
+    some(s) => json.get_string(s, "session") ?? "",
+    none => "",
+  }
+  guard sid != "" else println("(no session yet)")
+  let es = vault.entries(cfg)! |> list.filter((e) => e.session == sid)
+  let raw = list.sum(list.map(es, (e) => e.bytes))
+  let kept = list.sum(list.map(es, (e) => e.kept))
+  println("ctxgate report  session ${sid}")
+  println("  replaced outputs ${int.to_string(list.len(es))}   raw ${compress.human_bytes(raw)} → shown ${compress.human_bytes(kept)}   kept out ${compress.human_bytes(raw - kept)} (≈${int.to_string((raw - kept) / 4)} tokens)")
+  let ss = tune.stats(cfg, sid)!
+  if list.is_empty(ss) then println("  no replacements observed yet") else {
+    println("  kind            hits  misses  softened   (miss = the model asked again within ${int.to_string(tune.RECOVERY_SECS)}s)")
+    for s in ss {
+      println("  ${compress.pad_left("", 0)}${outline.pad_right(s.kind, 15)} ${compress.pad_left(int.to_string(s.hits), 4)}  ${compress.pad_left(int.to_string(s.misses), 6)}  ${if s.softened then "yes" else "no"}")
+    }
+  }
 }

@@ -14,6 +14,7 @@ import json
 import value
 import process
 import self.config
+import self.tune
 
 // Pure: returns the updated tool_input, or none when nothing should change.
 fn rewrite(cfg: config.Config, tool: String, input: Value) -> Option[Value] = match tool {
@@ -78,6 +79,8 @@ effect fn run(cfg: config.Config, raw: String) -> Option[String] = match json.pa
   ok(j) => {
     let tool = json.get_string(j, "tool_name") ?? ""
     let input = value.field(j, "tool_input") ?? value.object([])
+    // feedback loop: is this call the model recovering from the last replacement?
+    tune.observe_call(cfg, json.get_string(j, "session_id") ?? "", tool, input) ?? ()
     if tool == "Bash" then {
       let command = json.get_string(input, "command") ?? ""
       match rtk_rewrite(cfg, command) ?? Keep {
