@@ -65,7 +65,7 @@ effect fn main() -> Unit = {
     "statusline" => cmd_statusline(cfg),
     "init" => cmd_init(cfg, list.contains(args, "--global")),
     "gc" => cmd_gc(cfg, list.drop(args, 1), true),
-    "version" | "--version" | "-V" => println("ctxgate 0.10.0"),
+    "version" | "--version" | "-V" => println("ctxgate 0.11.0"),
     _ => println(USAGE),
   }
 }

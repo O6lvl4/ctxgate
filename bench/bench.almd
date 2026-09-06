@@ -105,7 +105,7 @@ fn report(runs: List[Run], tasks: List[Task]) -> List[String] = {
   let on = list.filter(runs, (r) => r.mode == "on")
   let tin_off = mean(list.map(off, (r) => r.in_tokens))
   let tin_on = mean(list.map(on, (r) => r.in_tokens))
-  if tin_off > 0 and tin_on > 0 then list.push(out, "input tokens per run: off ${int.to_string(tin_off)} → on ${int.to_string(tin_on)}  (${int.to_string((tin_off - tin_on) * 100 / tin_off)}% less); success off ${int.to_string(list.count(off, (r) => r.ok))}/${int.to_string(list.len(off))}, on ${int.to_string(list.count(on, (r) => r.ok))}/${int.to_string(list.len(on))}") else ()
+  if tin_off > 0 and tin_on > 0 then list.push(out, "input tokens per run: off ${int.to_string(tin_off)} → on ${int.to_string(tin_on)}  (${if tin_on <= tin_off then int.to_string((tin_off - tin_on) * 100 / tin_off) + "% less" else int.to_string((tin_on - tin_off) * 100 / tin_off) + "% MORE"}); success off ${int.to_string(list.count(off, (r) => r.ok))}/${int.to_string(list.len(off))}, on ${int.to_string(list.count(on, (r) => r.ok))}/${int.to_string(list.len(on))}") else ()
   out
 }
 
