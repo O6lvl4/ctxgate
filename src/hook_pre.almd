@@ -1,0 +1,132 @@
+// hook_pre — PreToolUse: shrink the *request* before the tool runs.
+//
+// v0.1 rules:
+//   Grep without head_limit  → inject head_limit = cfg.grep_head_limit
+//
+// Read is deliberately left alone here: silently truncating a Read hides the
+// existence of the rest of the file. PostToolUse handles oversized Reads with an
+// explicit "lines omitted" marker instead. (AST-aware Read arrives in v0.2.)
+//
+// Output contract (docs: hooks reference, PreToolUse):
+//   {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {...}}}
+// Emitting nothing means "no change". This hook never blocks (never exits non-zero).
+import json
+import value
+import process
+import self.config
+
+// Pure: returns the updated tool_input, or none when nothing should change.
+fn rewrite(cfg: config.Config, tool: String, input: Value) -> Option[Value] = match tool {
+  "Grep" => match json.get_int(input, "head_limit") {
+    some(_) => none,
+    none => some(value.merge(input, value.object([("head_limit", value.int(cfg.grep_head_limit))]))),
+  },
+  _ => none,
+}
+
+fn envelope(updated: Value) -> String = json.stringify(value.object([
+  ("hookSpecificOutput", value.object([
+    ("hookEventName", value.str("PreToolUse")),
+    ("updatedInput", updated),
+  ])),
+]))
+
+// ── RTK delegation ────────────────────────────────────────────────────────
+// If rtk (rtk-ai/rtk) is installed, Bash commands are handed to `rtk rewrite`, which
+// returns the token-optimised equivalent (`git status` → `rtk git status`). Exit codes:
+//   0 + stdout  rewrite, no permission rule matched  → updatedInput + allow (RTK's own contract)
+//   1           no rtk equivalent                    → untouched
+//   2           user deny rule matched               → untouched (Claude Code's deny handles it)
+//   3 + stdout  ask rule matched                     → updatedInput, no decision (user is prompted)
+// Anything else (rtk missing, crash, timeout) → untouched. ctxgate owns the vault, the budget
+// and dedup on top; RTK owns the Bash command surface. CTXGATE_RTK=0 turns this off.
+type RtkVerdict =
+  | Rewrite(String, Bool)   // command, auto_allow
+  | Keep
+
+effect fn rtk_rewrite(cfg: config.Config, command: String) -> RtkVerdict = {
+  guard cfg.rtk_bin != "" and command != "" else Keep
+  guard not string.starts_with(string.trim(command), "rtk ") and not string.starts_with(string.trim(command), "ctxgate ") else Keep
+  match process.exec_status_timeout(cfg.rtk_bin, ["rewrite", command], 2000) {
+    err(_) => Keep,
+    ok(st) => {
+      let out = string.trim(st.stdout)
+      match st.code {
+        0 => if out == "" or out == command then Keep else Rewrite(out, true),
+        3 => if out == "" or out == command then Keep else Rewrite(out, false),
+        _ => Keep,
+      }
+    },
+  }
+}
+
+fn envelope_allow(updated: Value, reason: String) -> String = json.stringify(value.object([
+  ("hookSpecificOutput", value.object([
+    ("hookEventName", value.str("PreToolUse")),
+    ("permissionDecision", value.str("allow")),
+    ("permissionDecisionReason", value.str(reason)),
+    ("updatedInput", updated),
+  ])),
+]))
+
+// Entry point: raw stdin JSON → Option[stdout JSON].
+effect fn run(cfg: config.Config, raw: String) -> Option[String] = match json.parse(raw) {
+  err(_) => none,
+  ok(j) => {
+    let tool = json.get_string(j, "tool_name") ?? ""
+    let input = value.field(j, "tool_input") ?? value.object([])
+    if tool == "Bash" then {
+      let command = json.get_string(input, "command") ?? ""
+      match rtk_rewrite(cfg, command) ?? Keep {
+        Keep => none,
+        Rewrite(cmd, allow) => {
+          let updated = value.merge(input, value.object([("command", value.str(cmd))]))
+          some(if allow then envelope_allow(updated, "ctxgate: rewritten via rtk") else envelope(updated))
+        },
+      }
+    } else match rewrite(cfg, tool, input) {
+      some(updated) => some(envelope(updated)),
+      none => none,
+    }
+  },
+}
+
+fn test_cfg() -> config.Config = config.Config {
+  home: "/tmp/ctxgate-test", max_bash: 8000, max_read: 12000, max_grep: 8000, max_other: 10000,
+  head: 30, tail: 30, salient: 40, line_clip: 200, grep_head_limit: 60,
+  outline_bin: "ctxgate-outline", outline_max: 120, max_block: 20,
+  window: 200000, lvl_compress: 40, lvl_aggressive: 60, lvl_isolate: 75,
+  dedup_min: 600, diff_max_cells: 4_000_000, rtk_bin: "", debug: false,
+}
+
+test "grep without head_limit gets one" {
+  let input = value.object([("pattern", value.str("foo")), ("path", value.str("src"))])
+  match rewrite(test_cfg(), "Grep", input) {
+    some(v) => {
+      assert_eq(json.get_int(v, "head_limit"), some(60))
+      assert_eq(json.get_string(v, "pattern"), some("foo"))
+    },
+    none => assert(false),
+  }
+}
+
+test "grep with head_limit is untouched" {
+  let input = value.object([("pattern", value.str("foo")), ("head_limit", value.int(5))])
+  assert(option.is_none(rewrite(test_cfg(), "Grep", input)))
+}
+
+test "other tools pass through" {
+  let input = value.object([("command", value.str("ls"))])
+  assert(option.is_none(rewrite(test_cfg(), "Bash", input)))
+}
+
+test "run produces the hook envelope" {
+  let raw = "{\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"x\"}}"
+  match run(test_cfg(), raw) ?? none {
+    some(out) => {
+      assert(string.contains(out, "\"hookEventName\":\"PreToolUse\""))
+      assert(string.contains(out, "\"head_limit\":60"))
+    },
+    none => assert(false),
+  }
+}

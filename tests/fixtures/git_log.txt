@@ -1,0 +1,19 @@
+commit 6b50c2cee111fac0f23311a2ec97ea52237010bd
+Author: fx <fx@example.com>
+Date:   Sun Sep 6 09:27:58 2026 +0900
+
+    second commit: tweak docs
+
+commit 6d1ff0bd94ba7d1ac16e44430eedaf6d25774ab1
+Author: fx <fx@example.com>
+Date:   Sun Sep 6 09:27:58 2026 +0900
+
+    initial import
+
+ README.md         |   3 +
+ logo.png          | Bin 0 -> 1024 bytes
+ package-lock.json | 604 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/lower.rs      |  60 ++++++
+ src/old.rs        |  10 +
+ src/rename_me.rs  |   8 +
+ 6 files changed, 685 insertions(+)

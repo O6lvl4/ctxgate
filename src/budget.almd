@@ -1,0 +1,198 @@
+// budget — the Context Budgeter: how full is the model's window, and how hard should
+// ctxgate squeeze right now?
+//
+//   usage   = the latest assistant turn's input tokens (prompt + cache read + cache create)
+//             read from the session transcript Claude Code hands every hook (transcript_path)
+//   level   = NORMAL → COMPRESS → AGGRESSIVE → ISOLATE as usage crosses the thresholds
+//   apply   = derive a tighter Config from the base one for that level
+//
+// Every hook call also drops a small record in <home>/sessions/<id>.json so `ctxgate status`
+// can answer without knowing the transcript path. All pure except the two readers/writer.
+import fs
+import json
+import value
+import env
+import self.config
+import self.dedup
+
+type Level =
+  | Normal
+  | Compress
+  | Aggressive
+  | Isolate
+
+type Usage = { used: Int, window: Int, pct: Int, level: Level }
+
+fn level_name(l: Level) -> String = match l {
+  Normal => "NORMAL",
+  Compress => "COMPRESS",
+  Aggressive => "AGGRESSIVE",
+  Isolate => "ISOLATE",
+}
+
+fn level_of(cfg: config.Config, pct: Int) -> Level =
+  if pct >= cfg.lvl_isolate then Isolate
+  else if pct >= cfg.lvl_aggressive then Aggressive
+  else if pct >= cfg.lvl_compress then Compress
+  else Normal
+
+// The transcript is JSONL; the last `assistant` line carrying `usage` is the current turn.
+// A compaction shows up naturally: the first turn after it has a much smaller prompt.
+effect fn usage_from_transcript(path: String) -> Option[Int] = {
+  guard path != "" and fs.exists(path) else none
+  let lines = fs.read_lines(path) ?? []
+  let hit = list.reverse(lines)
+    |> list.find((l) => string.contains(l, "\"type\":\"assistant\"") and string.contains(l, "\"usage\""))
+  match hit {
+    none => none,
+    some(l) => match json.parse(l) {
+      err(_) => none,
+      ok(j) => match value.field(j, "message")? {
+        none => none,
+        some(m) => match value.field(m, "usage")? {
+          none => none,
+          some(u) => some((json.get_int(u, "input_tokens") ?? 0)
+            + (json.get_int(u, "cache_read_input_tokens") ?? 0)
+            + (json.get_int(u, "cache_creation_input_tokens") ?? 0)),
+        },
+      },
+    },
+  }
+}
+
+fn usage_of(cfg: config.Config, used: Int) -> Usage = {
+  let pct = if cfg.window <= 0 then 0 else used * 100 / cfg.window
+  Usage { used: used, window: cfg.window, pct: pct, level: level_of(cfg, pct) }
+}
+
+// Tighter knobs per level. Byte budgets shrink so more outputs get vaulted; what is shown
+// shrinks too. ISOLATE keeps almost nothing inline — the model must pull from the vault.
+fn apply(cfg: config.Config, level: Level) -> config.Config = match level {
+  Normal => cfg,
+  Compress => config.Config { ...cfg,
+    max_bash: cfg.max_bash / 2, max_read: cfg.max_read / 2, max_grep: cfg.max_grep / 2, max_other: cfg.max_other / 2,
+    head: int.max(8, cfg.head / 2), tail: int.max(8, cfg.tail / 2), salient: int.max(10, cfg.salient / 2),
+    outline_max: int.min(cfg.outline_max, 80), max_block: int.min(cfg.max_block, 14), grep_head_limit: int.min(cfg.grep_head_limit, 40),
+  },
+  Aggressive => config.Config { ...cfg,
+    max_bash: cfg.max_bash / 4, max_read: cfg.max_read / 4, max_grep: cfg.max_grep / 4, max_other: cfg.max_other / 4,
+    head: 10, tail: 10, salient: 15, line_clip: int.min(cfg.line_clip, 140),
+    outline_max: 50, max_block: 10, grep_head_limit: 30,
+  },
+  Isolate => config.Config { ...cfg,
+    max_bash: 1500, max_read: 1500, max_grep: 1500, max_other: 1500,
+    head: 6, tail: 6, salient: 8, line_clip: 120,
+    outline_max: 30, max_block: 6, grep_head_limit: 20,
+  },
+}
+
+// One-line banner the model sees on every replaced output while squeezed (none when NORMAL).
+fn banner(u: Usage) -> Option[String] = match u.level {
+  Normal => none,
+  _ => some("[ctxgate] context ${int.to_string(u.pct)}% of ${int.to_string(u.window / 1000)}k → ${level_name(u.level)}: outputs are trimmed harder; pull details from the vault only when needed."),
+}
+
+// ── session record ────────────────────────────────────────────────────────
+fn sessions_dir(cfg: config.Config) -> String = "${cfg.home}/sessions"
+
+effect fn record_usage(cfg: config.Config, session_id: String, u: Usage) -> Unit = {
+  guard session_id != "" else ()
+  fs.mkdir_p(sessions_dir(cfg))!
+  // A large drop in usage means Claude Code compacted: the model no longer remembers what
+  // it saw, so the dedup memory for this session must go too.
+  let prev_used = match fs.read_text_if_exists("${sessions_dir(cfg)}/${session_id}.json") {
+    ok(some(t)) => match json.parse(t) { ok(j) => json.get_int(j, "used") ?? 0, err(_) => 0 },
+    _ => 0,
+  }
+  if prev_used > 50_000 and u.used * 10 < prev_used * 7 then dedup.forget_session(cfg, session_id)! else ()
+  fs.write("${sessions_dir(cfg)}/${session_id}.json", json.stringify(value.object([
+    ("session", value.str(session_id)),
+    ("used", value.int(u.used)),
+    ("window", value.int(u.window)),
+    ("pct", value.int(u.pct)),
+    ("level", value.str(level_name(u.level))),
+    ("ts", value.int(env.unix_timestamp())),
+  ])))!
+}
+
+// Resolve the hook's effective config: read usage, record it, tighten. Falls back to the
+// base config if the transcript is unreadable — never blocks a hook.
+effect fn effective(cfg: config.Config, raw_hook_input: String) -> (config.Config, Option[Usage]) = match json.parse(raw_hook_input) {
+  err(_) => (cfg, none),
+  ok(j) => {
+    let path = json.get_string(j, "transcript_path") ?? ""
+    match usage_from_transcript(path) ?? none {
+      none => (cfg, none),
+      some(used) => {
+        let u = usage_of(cfg, used)
+        record_usage(cfg, json.get_string(j, "session_id") ?? "", u) ?? ()
+        (apply(cfg, u.level), some(u))
+      },
+    }
+  },
+}
+
+// Most recently updated session record, for `ctxgate status`.
+effect fn latest_session(cfg: config.Config) -> Option[Value] = {
+  let dir = sessions_dir(cfg)
+  guard fs.exists(dir) else none
+  let names = fs.list_dir(dir) ?? []
+  let stamped = list.filter_map(names, (n) => {
+    let p = "${dir}/${n}"
+    match fs.modified_at(p) {
+      ok(t) => some((t, p)),
+      err(_) => none,
+    }
+  })
+  let newest = list.fold(stamped, none, (best: Option[(Int, String)], cur) => match best {
+    none => some(cur),
+    some(b) => if cur.0 > b.0 then some(cur) else some(b),
+  })
+  match newest {
+    none => none,
+    some((_, p)) => match fs.read_text(p) {
+      ok(t) => json.parse(t)?,
+      err(_) => none,
+    },
+  }
+}
+
+fn test_cfg() -> config.Config = config.Config {
+  home: "/tmp/ctxgate-test", max_bash: 8000, max_read: 12000, max_grep: 8000, max_other: 10000,
+  head: 30, tail: 30, salient: 40, line_clip: 200, grep_head_limit: 60,
+  outline_bin: "ctxgate-outline", outline_max: 120, max_block: 20,
+  window: 200000, lvl_compress: 40, lvl_aggressive: 60, lvl_isolate: 75,
+  dedup_min: 600, diff_max_cells: 4_000_000, rtk_bin: "", debug: false,
+}
+
+test "levels follow thresholds" {
+  let cfg = test_cfg()
+  assert_eq(level_of(cfg, 0), Normal)
+  assert_eq(level_of(cfg, 39), Normal)
+  assert_eq(level_of(cfg, 40), Compress)
+  assert_eq(level_of(cfg, 60), Aggressive)
+  assert_eq(level_of(cfg, 75), Isolate)
+  assert_eq(level_of(cfg, 99), Isolate)
+}
+
+test "usage_of computes pct against the window" {
+  let u = usage_of(test_cfg(), 130000)
+  assert_eq(u.pct, 65)
+  assert_eq(u.level, Aggressive)
+}
+
+test "apply tightens monotonically" {
+  let cfg = test_cfg()
+  let c = apply(cfg, Compress)
+  let a = apply(cfg, Aggressive)
+  let i = apply(cfg, Isolate)
+  assert(c.max_bash < cfg.max_bash and a.max_bash < c.max_bash and i.max_bash < a.max_bash)
+  assert(c.head <= cfg.head and a.head <= c.head and i.head <= a.head)
+  assert_eq(apply(cfg, Normal).max_bash, cfg.max_bash)
+  assert_eq(i.grep_head_limit, 20)
+}
+
+test "banner only when squeezed" {
+  assert(option.is_none(banner(usage_of(test_cfg(), 1000))))
+  assert(option.is_some(banner(usage_of(test_cfg(), 150000))))
+}

@@ -1,0 +1,21 @@
+--- FAIL: TestFail (0.00s)
+    fx_test.go:4: expected 1 got 2
+    fx_test.go:4: some context
+--- FAIL: TestPanic (0.00s)
+panic: assignment to entry in nil map [recovered, repanicked]
+
+goroutine 7 [running]:
+testing.tRunner.func1.2({0x102352568, 0x102388fa0})
+	/usr/local/go/src/testing/testing.go:2128 +0x1a0
+testing.tRunner.func1()
+	/usr/local/go/src/testing/testing.go:2131 +0x318
+panic({0x102352568?, 0x102388fa0?})
+	/usr/local/go/src/runtime/panic.go:859 +0x120
+fx.TestPanic(0xb37033c06c8?)
+	/home/dev/fx/go/fx_test.go:5 +0x34
+testing.tRunner(0xb37033c06c8, 0x10236f418)
+	/usr/local/go/src/testing/testing.go:2190 +0xc4
+created by testing.(*T).Run in goroutine 1
+	/usr/local/go/src/testing/testing.go:2255 +0x3b8
+FAIL	fx	0.327s
+FAIL

@@ -1,0 +1,310 @@
+// ctxgate — an agent context firewall for Claude Code.
+//
+//   ctxgate hook pre          PreToolUse  handler (stdin JSON → stdout JSON)
+//   ctxgate hook post         PostToolUse handler
+//   ctxgate show <id> [...]   read a vaulted output back, in slices
+//   ctxgate list [n]          recent vault entries
+//   ctxgate stats             bytes kept out of the model's context
+//   ctxgate init [--global]   register the hooks in Claude Code settings
+import io
+import fs
+import env
+import json
+import value
+import regex
+import self.config
+import self.compress
+import self.vault
+import self.hook_pre
+import self.hook_post
+import self.outline
+import self.budget
+
+let USAGE = """
+ctxgate — agent context firewall for Claude Code
+
+usage:
+  ctxgate hook pre | post            hook handlers (read JSON on stdin)
+  ctxgate show <id> [--grep RE] [--around RE [N]] [--lines A-B] [--head N] [--tail N] [--symbol NAME]
+  ctxgate outline <file>             symbol table (kind, name, line range) of a source file
+  ctxgate summarize "<command>"      stdin = that command's output → runner-aware summary (cargo/go/pytest/vitest/jest/tsc)
+  ctxgate list [N]                   last N vault entries (default 20)
+  ctxgate stats                      totals: raw bytes vaulted vs bytes shown
+  ctxgate status                     context budget of the latest session (usage, level, thresholds)
+  ctxgate init [--global]            add hooks to .claude/settings.json (or ~/.claude/settings.json)
+  ctxgate path <id>                  print the raw file path
+
+env: CTXGATE_HOME, CTXGATE_MAX_BASH/READ/GREP/OTHER, CTXGATE_HEAD, CTXGATE_TAIL,
+     CTXGATE_SALIENT, CTXGATE_LINE_CLIP, CTXGATE_GREP_HEAD_LIMIT, CTXGATE_DEBUG=1
+"""
+
+effect fn main() -> Unit = {
+  let args = env.args()
+  let cfg = config.load()!
+  match list.get(args, 0) ?? "help" {
+    "hook" => cmd_hook(cfg, list.get(args, 1) ?? ""),
+    "show" => cmd_show(cfg, list.drop(args, 1)),
+    "outline" => cmd_outline(cfg, list.get(args, 1) ?? ""),
+    "summarize" => cmd_summarize(cfg, list.get(args, 1) ?? ""),
+    "path" => cmd_path(cfg, list.get(args, 1) ?? ""),
+    "list" => cmd_list(cfg, list.get(args, 1) ?? "20"),
+    "stats" => cmd_stats(cfg),
+    "status" => cmd_status(cfg),
+    "init" => cmd_init(cfg, list.contains(args, "--global")),
+    "version" | "--version" | "-V" => println("ctxgate 0.7.0"),
+    _ => println(USAGE),
+  }
+}
+
+// ── hooks ─────────────────────────────────────────────────────────────────
+// Hooks must never block the agent: swallow everything, print JSON only on a rewrite.
+effect fn cmd_hook(base: config.Config, which: String) -> Unit = {
+  let raw = io.read_all()
+  vault.debug_dump(base, which, raw) ?? ()
+  // Context Budgeter: tighten the config as the window fills; banner tells the model why.
+  let (cfg, usage) = budget.effective(base, raw) ?? (base, none)
+  let banner = match usage {
+    some(u) => budget.banner(u) ?? "",
+    none => "",
+  }
+  let out = match which {
+    "pre" => hook_pre.run(cfg, raw) ?? none,
+    "post" => hook_post.run(cfg, raw, banner) ?? none,
+    _ => none,
+  }
+  match out {
+    some(s) => println(s),
+    none => (),
+  }
+}
+
+// ── show ──────────────────────────────────────────────────────────────────
+type Slice =
+  | All
+  | Grep(String)
+  | Around(String, Int)
+  | Lines(Int, Int)
+  | Head(Int)
+  | Tail(Int)
+  | Symbol(String)
+
+fn parse_slice(rest: List[String]) -> Slice = {
+  let flag = list.get(rest, 0) ?? ""
+  let a = list.get(rest, 1) ?? ""
+  let b = list.get(rest, 2) ?? ""
+  match flag {
+    "--symbol" => Symbol(a),
+    "--grep" => Grep(a),
+    "--around" => Around(a, int.parse(b) ?? 20),
+    "--head" => Head(int.parse(a) ?? 50),
+    "--tail" => Tail(int.parse(a) ?? 50),
+    "--lines" => match string.split_once(a, "-") {
+      some((lo, hi)) => Lines(int.parse(lo) ?? 1, int.parse(hi) ?? 1_000_000),
+      none => Lines(int.parse(a) ?? 1, int.parse(a) ?? 1),
+    },
+    _ => All,
+  }
+}
+
+fn numbered_line(i: Int, line: String, width: Int) -> String =
+  "${compress.pad_left(int.to_string(i), width)}│ ${line}"
+
+// Pure slicing over the raw text; returns rendered lines.
+fn slice_text(text: String, s: Slice) -> List[String] = {
+  let lines = string.lines(text)
+  let n = list.len(lines)
+  let width = compress.digits(n)
+  let all = list.enumerate(lines) |> list.map((p) => (p.0 + 1, p.1))
+  let render = (ps: List[(Int, String)]) => list.map(ps, (p) => numbered_line(p.0, p.1, width))
+  match s {
+    All => lines,
+    Symbol(_) => lines,   // handled in cmd_show (needs the file, not the vault text)
+    Head(k) => render(list.take(all, k)),
+    Tail(k) => render(list.drop(all, int.max(0, n - k))),
+    Lines(lo, hi) => render(list.filter(all, (p) => p.0 >= lo and p.0 <= hi)),
+    Grep(re) => render(list.filter(all, (p) => regex.is_match(re, p.1))),
+    Around(re, ctx) => {
+      let hits = list.filter(all, (p) => regex.is_match(re, p.1)) |> list.map((p) => p.0)
+      let keep = list.filter(all, (p) => list.any(hits, (h) => p.0 >= h - ctx and p.0 <= h + ctx))
+      // insert a separator where the kept ranges are discontiguous
+      var out: List[String] = []
+      var prev = 0
+      for p in keep {
+        if prev != 0 and p.0 != prev + 1 then list.push(out, "   ⋮") else ()
+        list.push(out, numbered_line(p.0, p.1, width))
+        prev = p.0
+      }
+      out
+    },
+  }
+}
+
+effect fn cmd_show(cfg: config.Config, rest: List[String]) -> Unit = {
+  let id = vault.resolve(cfg, list.get(rest, 0) ?? "")!
+  match parse_slice(list.drop(rest, 1)) {
+    Symbol(name) => cmd_symbol(cfg, id, name)!,
+    s => {
+      let text = vault.get(cfg, id)!
+      println(list.join(slice_text(text, s), "\n"))
+    },
+  }
+}
+
+// `--symbol` reads from the ORIGINAL file (the vault may hold only one Read page),
+// located via the index entry's label, which for Read is the file path.
+effect fn cmd_symbol(cfg: config.Config, id: String, name: String) -> Unit = {
+  let es = vault.entries(cfg)!
+  let path = match list.find(es, (e) => e.id == id and e.tool == "Read") {
+    some(e) => e.label,
+    none => err("vault entry ${id} is not a Read; --symbol needs a source file")!,
+  }
+  let o = outline.of_file(cfg, path)!
+  let sym = match outline.find(o, name) {
+    some(s) => s,
+    none => err("no symbol '${name}' in ${path} (try: ctxgate outline ${path})")!,
+  }
+  let lines = fs.read_lines(path)!
+  let width = compress.digits(list.len(lines))
+  println("${sym.kind} ${sym.name}  ${path}:${int.to_string(sym.start)}-${int.to_string(sym.end)}")
+  for (i, line) in list.enumerate(lines) {
+    if i + 1 >= sym.start and i + 1 <= sym.end then println(numbered_line(i + 1, line, width)) else ()
+  }
+}
+
+effect fn cmd_outline(cfg: config.Config, path: String) -> Unit = {
+  guard path != "" else err("usage: ctxgate outline <file>")
+  let o = outline.of_file(cfg, path)!
+  println("${path}: ${int.to_string(o.total_lines)} lines, ${o.lang}, ${int.to_string(list.len(o.symbols))} symbols")
+  for l in outline.render(o, 100000) { println(l) }
+}
+
+effect fn cmd_path(cfg: config.Config, prefix: String) -> Unit = {
+  let id = vault.resolve(cfg, prefix)!
+  println(vault.entry_path(cfg, id))
+}
+
+// ── list / stats ──────────────────────────────────────────────────────────
+effect fn cmd_list(cfg: config.Config, n_str: String) -> Unit = {
+  let n = int.parse(n_str) ?? 20
+  let es = vault.entries(cfg)!
+  let recent = list.drop(es, int.max(0, list.len(es) - n))
+  if list.is_empty(recent) then println("(vault is empty)") else ()
+  for e in recent {
+    println("${e.id}  ${compress.pad_left(e.tool, 6)}  ${compress.pad_left(compress.human_bytes(e.bytes), 8)} → ${compress.pad_left(compress.human_bytes(e.kept), 7)}  ${compress.clip(e.label, 70)}")
+  }
+}
+
+effect fn cmd_stats(cfg: config.Config) -> Unit = {
+  let es = vault.entries(cfg)!
+  let raw = list.sum(list.map(es, (e) => e.bytes))
+  let kept = list.sum(list.map(es, (e) => e.kept))
+  let saved = raw - kept
+  let pct = if raw == 0 then 0 else saved * 100 / raw
+  println("ctxgate vault: ${cfg.home}")
+  println("  entries        ${int.to_string(list.len(es))}")
+  println("  raw bytes      ${compress.human_bytes(raw)}")
+  println("  shown to model ${compress.human_bytes(kept)}")
+  println("  kept out       ${compress.human_bytes(saved)}  (${int.to_string(pct)}%, ≈${int.to_string(saved / 4)} tokens)")
+}
+
+// ── init ──────────────────────────────────────────────────────────────────
+fn hook_entry(matcher: String, which: String) -> Value = value.object([
+  ("matcher", value.str(matcher)),
+  ("hooks", value.array([value.object([
+    ("type", value.str("command")),
+    ("command", value.str("ctxgate hook ${which}")),
+    ("timeout", value.int(15)),
+  ])])),
+])
+
+// Pure merge: replaces any existing ctxgate entries with the current ones (so re-running
+// `init` after an upgrade picks up new matchers) and leaves every other hook untouched.
+fn merge_settings(settings: Value) -> Value = {
+  let hooks = value.field(settings, "hooks") ?? value.object([])
+  let set = (hs: Value, event: String, entry: Value) => {
+    let existing = json.get_array(hs, event) ?? []
+    var next = list.filter(existing, (e) => not string.contains(json.stringify(e), "ctxgate hook"))
+    list.push(next, entry)
+    value.merge(hs, value.object([(event, value.array(next))]))
+  }
+  let h1 = set(hooks, "PreToolUse", hook_entry("Bash|Grep", "pre"))
+  let h2 = set(h1, "PostToolUse", hook_entry("Bash|Read|Grep|Glob|WebFetch|mcp__.*", "post"))
+  value.merge(settings, value.object([("hooks", h2)]))
+}
+
+effect fn cmd_init(cfg: config.Config, global: Bool) -> Unit = {
+  let dir = if global then "${env.get("HOME") ?? "."}/.claude" else "${env.cwd()!}/.claude"
+  let path = "${dir}/settings.json"
+  fs.mkdir_p(dir)!
+  let current = fs.read_text_if_exists(path)! ?? "{}"
+  let settings = json.parse(current) |> result.map_err((e) => "parsing ${path}: ${e}")!
+  let merged = merge_settings(settings)
+  let had_file = fs.exists(path)
+  if had_file then fs.copy(path, "${path}.bak")! else ()
+  fs.write(path, json.stringify_pretty(merged) + "\n")!
+  println("ctxgate hooks written to ${path}" + (if had_file then " (backup: ${path}.bak)" else ""))
+  println("vault: ${cfg.home}")
+  println("restart Claude Code (or /hooks) to pick them up; verify with: ctxgate stats")
+}
+
+test "parse_slice understands every flag" {
+  assert_eq(parse_slice(["--head", "5"]), Head(5))
+  assert_eq(parse_slice(["--tail", "7"]), Tail(7))
+  assert_eq(parse_slice(["--lines", "3-9"]), Lines(3, 9))
+  assert_eq(parse_slice(["--grep", "err"]), Grep("err"))
+  assert_eq(parse_slice(["--around", "err", "4"]), Around("err", 4))
+  assert_eq(parse_slice([]), All)
+}
+
+test "slice_text lines and around" {
+  let text = "a\nb\nerror here\nd\ne\nf"
+  assert_eq(slice_text(text, Lines(2, 3)), ["2│ b", "3│ error here"])
+  assert_eq(slice_text(text, Around("error", 1)), ["2│ b", "3│ error here", "4│ d"])
+  assert_eq(slice_text(text, Tail(1)), ["6│ f"])
+}
+
+test "merge_settings is idempotent and preserves other hooks" {
+  let base = json.parse("{\"model\":\"x\",\"hooks\":{\"PreToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[]}]}}")!
+  let once = merge_settings(base)
+  let twice = merge_settings(once)
+  assert_eq(json.stringify(once), json.stringify(twice))
+  assert_eq(json.get_string(once, "model"), some("x"))
+  let pre = json.get_array(value.field(once, "hooks")!, "PreToolUse") ?? []
+  assert_eq(list.len(pre), 2)
+  let post = json.get_array(value.field(once, "hooks")!, "PostToolUse") ?? []
+  assert_eq(list.len(post), 1)
+}
+
+// `ctxgate summarize "cargo test" < out.txt` — the same parser the hook uses, for humans and CI.
+effect fn cmd_summarize(cfg: config.Config, command: String) -> Unit = {
+  let text = io.read_all()
+  match hook_post.bash_summary(cfg, command, text) {
+    some((_, s)) => println(s),
+    none => {
+      let s = compress.summarize(text, cfg.head, cfg.tail, cfg.salient, cfg.line_clip)
+      println(compress.render("Bash", command, "-", s))
+    },
+  }
+}
+
+// ── status (Context Budgeter) ─────────────────────────────────────────────
+effect fn cmd_status(cfg: config.Config) -> Unit = {
+  println("ctxgate context budget  (window ${int.to_string(cfg.window / 1000)}k; levels: COMPRESS ≥${int.to_string(cfg.lvl_compress)}%  AGGRESSIVE ≥${int.to_string(cfg.lvl_aggressive)}%  ISOLATE ≥${int.to_string(cfg.lvl_isolate)}%)")
+  match budget.latest_session(cfg) ?? none {
+    none => println("  no session seen yet (records appear after the first hook call)"),
+    some(s) => {
+      let used = json.get_int(s, "used") ?? 0
+      let pct = json.get_int(s, "pct") ?? 0
+      let level = json.get_string(s, "level") ?? "NORMAL"
+      let sid = json.get_string(s, "session") ?? ""
+      println("  session   ${sid}")
+      println("  used      ${int.to_string(used / 1000)}k tokens  (${int.to_string(pct)}%)  → ${level}")
+      let eff = budget.apply(cfg, budget.level_of(cfg, pct))
+      println("  effective budgets  bash ${int.to_string(eff.max_bash)}  read ${int.to_string(eff.max_read)}  grep ${int.to_string(eff.max_grep)}  head/tail ${int.to_string(eff.head)}/${int.to_string(eff.tail)}  outline ${int.to_string(eff.outline_max)}")
+      let es = vault.entries(cfg)! |> list.filter((e) => e.session == sid)
+      let raw = list.sum(list.map(es, (e) => e.bytes))
+      let kept = list.sum(list.map(es, (e) => e.kept))
+      println("  this session: ${int.to_string(list.len(es))} outputs vaulted, ${compress.human_bytes(raw - kept)} kept out of context (≈${int.to_string((raw - kept) / 4)} tokens)")
+    },
+  }
+}

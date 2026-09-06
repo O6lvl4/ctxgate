@@ -1,0 +1,343 @@
+// gitout — compact views of git output: diff / show / log -p, status, log.
+//
+// `git diff` is the classic context killer: a 2,000-line diff where 1,800 lines are a
+// lockfile and the rest is unchanged context. What the model needs is
+//   which files changed, how much · the hunks of the files that matter · changed lines
+//   with one line of context, not three · nothing from lockfiles / generated / binaries.
+// Pure; every parser returns none when the text is not that kind of git output.
+import regex
+import fs
+import self.compress
+
+type Kind =
+  | Diff
+  | Status
+  | Log
+  | NotGit
+
+// ── detection ─────────────────────────────────────────────────────────────
+fn detect(command: String, text: String) -> Kind = {
+  let toks = string.split(command, " ") |> list.filter((t) => t != "")
+  let c = " " + list.join(toks, " ") + " "
+  let has = (n: String) => string.contains(c, " " + n + " ")
+  let patch_flag = has("-p") or has("--patch") or has("-u")
+  if has("git diff") or has("git show") or (has("git log") and patch_flag) or has("git stash show") then Diff
+  else if has("git status") then Status
+  else if has("git log") or has("git reflog") then Log
+  else detect_by_text(text)
+}
+
+fn detect_by_text(text: String) -> Kind = {
+  let lines = string.lines(text)
+  if list.any(lines, (l) => string.starts_with(l, "diff --git ")) then Diff
+  else if list.any(lines, (l) => string.starts_with(l, "On branch ") or string.starts_with(l, "HEAD detached at ")) then Status
+  else if list.any(lines, (l) => regex.is_match("^commit [0-9a-f]+", l)) then Log
+  else NotGit
+}
+
+fn name(k: Kind) -> String = match k {
+  Diff => "git diff",
+  Status => "git status",
+  Log => "git log",
+  NotGit => "",
+}
+
+fn summarize(k: Kind, text: String, max_block: Int) -> Option[String] = match k {
+  Diff => diff(text, max_block),
+  Status => status(text),
+  Log => log(text),
+  NotGit => none,
+}
+
+// ── diff ──────────────────────────────────────────────────────────────────
+type Hunk = { header: String, lines: List[String] }   // raw ` `, `+`, `-` lines
+type FileDiff = {
+  path: String,
+  old_path: String,
+  status: String,      // M A D R B
+  added: Int,
+  removed: Int,
+  hunks: List[Hunk],
+}
+
+let NOISY_SUFFIXES = [
+  "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "go.sum", "poetry.lock",
+  "Gemfile.lock", "composer.lock", "Pipfile.lock", "flake.lock", "bun.lockb",
+  ".min.js", ".min.css", ".map", ".snap", ".pb.go", ".pb.rs", "_pb2.py", ".generated.ts", ".g.dart",
+]
+let NOISY_DIRS = ["dist/", "build/", "generated/", "vendor/", "node_modules/", "__snapshots__/", ".next/"]
+
+fn is_noisy(path: String) -> Bool =
+  list.any(NOISY_SUFFIXES, (s) => string.ends_with(path, s))
+    or list.any(NOISY_DIRS, (d) => string.starts_with(path, d) or string.contains(path, "/" + d))
+
+fn noisy_reason(path: String) -> String =
+  if string.contains(path, "lock") then "lockfile" else "generated"
+
+// `diff --git a/X b/Y` → (X, Y); paths may contain spaces, so split on " b/" from the left
+// after stripping "a/". Quoted paths (non-ASCII) are left as-is.
+fn git_paths(l: String) -> (String, String) = {
+  let rest = string.drop(l, string.len("diff --git a/"))
+  match string.index_of(rest, " b/") {
+    some(i) => (string.slice(rest, 0, i), string.drop(rest, i + 3)),
+    none => (rest, rest),
+  }
+}
+
+// Split `lines` into segments, each starting at a line where `is_start` holds.
+fn segments(lines: List[String], is_start: fn(String) -> Bool) -> List[List[String]] = {
+  let starts = list.enumerate(lines) |> list.filter_map((p) => if is_start(p.1) then some(p.0) else none)
+  let n = list.len(lines)
+  list.enumerate(starts) |> list.map((p) => {
+    let from = p.1
+    let to = list.get(starts, p.0 + 1) ?? n
+    list.slice(lines, from, to)
+  })
+}
+
+fn parse_diff(text: String) -> List[FileDiff] =
+  segments(string.lines(text), (l) => string.starts_with(l, "diff --git ")) |> list.map(parse_file)
+
+fn parse_file(seg: List[String]) -> FileDiff = {
+  let (old_path, path) = git_paths(list.get(seg, 0) ?? "diff --git a/? b/?")
+  let status = list.fold(seg, "M", (s, l) =>
+    if string.starts_with(l, "new file mode") then "A"
+    else if string.starts_with(l, "deleted file mode") then "D"
+    else if string.starts_with(l, "rename from ") then "R"
+    else if string.starts_with(l, "Binary files ") then "B"
+    else s)
+  let hunks = segments(seg, (l) => string.starts_with(l, "@@")) |> list.map((h) => Hunk {
+    header: list.get(h, 0) ?? "",
+    lines: list.drop(h, 1) |> list.filter((l) => string.starts_with(l, "+") or string.starts_with(l, "-") or string.starts_with(l, " ")),
+  })
+  let count = (prefix: String) => list.sum(list.map(hunks, (h) => list.count(h.lines, (l) => string.starts_with(l, prefix))))
+  FileDiff { path: path, old_path: old_path, status: status, added: count("+"), removed: count("-"), hunks: hunks }
+}
+
+// Keep changed lines plus one context line on each side of every change run; mark gaps.
+fn squeeze_hunk(lines: List[String], max_lines: Int) -> List[String] = {
+  let n = list.len(lines)
+  let is_change = (i: Int) => match list.get(lines, i) {
+    some(l) => string.starts_with(l, "+") or string.starts_with(l, "-"),
+    none => false,
+  }
+  let keep = list.range(0, n) |> list.filter((i) => is_change(i) or is_change(i - 1) or is_change(i + 1))
+  var out: List[String] = []
+  var prev = -1
+  for i in keep {
+    if prev >= 0 and i != prev + 1 then list.push(out, "  ⋮") else ()
+    list.push(out, list.get(lines, i) ?? "")
+    prev = i
+  }
+  if list.len(out) > max_lines then list.take(out, max_lines) + ["  … ${int.to_string(list.len(out) - max_lines)} more lines of this hunk (vault)"] else out
+}
+
+// `@@ -3,7 +3,7 @@ fn f1() -> i32 { 1 }` → `@@ -3 +3 @@ fn f1() -> i32 { 1 }`
+fn short_hunk_header(h: String) -> String = match regex.captures("^@@ -([0-9]+)(,[0-9]+)? \\+([0-9]+)(,[0-9]+)? @@(.*)$", h) {
+  some(c) => "@@ -${list.get(c, 1) ?? ""} +${list.get(c, 3) ?? ""} @@${compress.clip(list.get(c, 5) ?? "", 60)}",
+  none => compress.clip(h, 80),
+}
+
+fn status_word(f: FileDiff) -> String = match f.status {
+  "A" => "A", "D" => "D", "R" => "R", "B" => "B", _ => "M",
+}
+
+fn count_str(f: FileDiff) -> String = {
+  let a = if f.added > 0 then "+${int.to_string(f.added)}" else ""
+  let r = if f.removed > 0 then "−${int.to_string(f.removed)}" else ""
+  string.trim(a + " " + r)
+}
+
+fn diff(text: String, max_block: Int) -> Option[String] = {
+  let files = parse_diff(text)
+  guard not list.is_empty(files) else none
+  let total_add = list.sum(list.map(files, (f) => f.added))
+  let total_rm = list.sum(list.map(files, (f) => f.removed))
+  let path_w = list.fold(files, 8, (w, f) => int.max(w, int.min(60, string.len(display_path(f)))))
+
+  var out: List[String] = []
+  list.push(out, "git diff: ${int.to_string(list.len(files))} files, +${int.to_string(total_add)} −${int.to_string(total_rm)}")
+  for f in files {
+    let note = if f.status == "B" then "binary"
+      else if is_noisy(f.path) then "${noisy_reason(f.path)} — hunks omitted"
+      else if f.status == "D" then "deleted"
+      else if list.len(f.hunks) > 1 then "${int.to_string(list.len(f.hunks))} hunks" else ""
+    list.push(out, "  ${status_word(f)}  ${pad_right(compress.clip(display_path(f), 60), path_w)}  ${pad_right(count_str(f), 10)} ${note}")
+  }
+
+  // hunk bodies: only for files worth reading, under a total line budget
+  let budget = max_block * 15
+  var used = 0
+  var skipped = 0
+  for f in files {
+    let show = f.status != "B" and f.status != "D" and not is_noisy(f.path) and not list.is_empty(f.hunks)
+    if show then {
+      if used >= budget then skipped = skipped + 1
+      else {
+        let hunks_shown = list.take(f.hunks, 8)
+        for h in hunks_shown {
+          if used < budget then {
+            list.push(out, "── ${f.path} ${short_hunk_header(h.header)} ──")
+            let body = squeeze_hunk(h.lines, max_block)
+            for l in body { list.push(out, "  " + l) }
+            used = used + list.len(body) + 1
+          } else ()
+        }
+        if list.len(f.hunks) > 8 then list.push(out, "── ${f.path}: … ${int.to_string(list.len(f.hunks) - 8)} more hunks (vault) ──") else ()
+      }
+    } else ()
+  }
+  if skipped > 0 then list.push(out, "── … hunks of ${int.to_string(skipped)} more files omitted (line budget; see vault or `git diff -- <path>`) ──") else ()
+  some(list.join(out, "\n"))
+}
+
+fn display_path(f: FileDiff) -> String =
+  if f.status == "R" and f.old_path != f.path then "${f.old_path} → ${f.path}" else f.path
+
+fn pad_right(s: String, w: Int) -> String =
+  if string.len(s) >= w then s else s + string.repeat(" ", w - string.len(s))
+
+// ── status ────────────────────────────────────────────────────────────────
+fn status(text: String) -> Option[String] = {
+  let lines = string.lines(text)
+  let branch = list.find(lines, (l) => string.starts_with(l, "On branch ") or string.starts_with(l, "HEAD detached at "))
+  guard option.is_some(branch) else none
+  let sync = list.find(lines, (l) => string.starts_with(l, "Your branch is ")) |> option.map((l) => string.trim(regex.replace("^Your branch is |\\.$", l, ""))) ?? ""
+
+  var section = ""
+  var staged: List[String] = []
+  var unstaged: List[String] = []
+  var untracked: List[String] = []
+  for l in lines {
+    if string.starts_with(l, "Changes to be committed") then section = "staged"
+    else if string.starts_with(l, "Changes not staged") then section = "unstaged"
+    else if string.starts_with(l, "Untracked files") then section = "untracked"
+    else if string.starts_with(l, "Unmerged paths") then section = "unstaged"
+    else if string.starts_with(l, "\t") then {
+      let entry = status_entry(string.trim(l))
+      match section {
+        "staged" => list.push(staged, entry),
+        "unstaged" => list.push(unstaged, entry),
+        "untracked" => list.push(untracked, entry),
+        _ => (),
+      }
+    } else ()
+  }
+  let head = string.replace(string.replace(branch ?? "", "On branch ", ""), "HEAD detached at ", "detached@")
+  var out: List[String] = []
+  list.push(out, "git status: ${head}" + (if sync != "" then " (${sync})" else ""))
+  list.push(out, "  staged (${int.to_string(list.len(staged))}): " + join_cap(staged, 30))
+  list.push(out, "  unstaged (${int.to_string(list.len(unstaged))}): " + join_cap(unstaged, 30))
+  list.push(out, "  untracked (${int.to_string(list.len(untracked))}): " + join_cap(untracked, 30))
+  if list.is_empty(staged) and list.is_empty(unstaged) and list.is_empty(untracked) then list.push(out, "  clean") else ()
+  some(list.join(out, "\n"))
+}
+
+// "modified:   src/a.rs" → "M src/a.rs"; "renamed:    a -> b" → "R a → b"; bare path → path
+fn status_entry(e: String) -> String = match string.split_once(e, ":") {
+  some((kind, rest)) => {
+    let p = string.replace(string.trim(rest), " -> ", " → ")
+    let k = match kind {
+      "modified" => "M", "new file" => "A", "deleted" => "D", "renamed" => "R", "copied" => "C",
+      "both modified" => "UU", "typechange" => "T", _ => kind,
+    }
+    "${k} ${p}"
+  },
+  none => e,
+}
+
+fn join_cap(xs: List[String], max: Int) -> String =
+  if list.len(xs) <= max then list.join(xs, ", ")
+  else list.join(list.take(xs, max), ", ") + ", … ${int.to_string(list.len(xs) - max)} more"
+
+// ── log ───────────────────────────────────────────────────────────────────
+type Commit = { sha: String, author: String, date: String, subject: String, stat: String }
+
+fn log(text: String) -> Option[String] = {
+  let commits = segments(string.lines(text), (l) => regex.is_match("^commit [0-9a-f]+", l)) |> list.map(parse_commit)
+  guard not list.is_empty(commits) else none
+  let shown = list.take(commits, 60)
+  var out: List[String] = []
+  list.push(out, "git log: ${int.to_string(list.len(commits))} commits")
+  for c in shown {
+    list.push(out, "  ${c.sha}  ${c.date}  ${compress.clip(c.author, 16)}  ${compress.clip(c.subject, 90)}" + (if c.stat != "" then "  [${c.stat}]" else ""))
+  }
+  if list.len(commits) > 60 then list.push(out, "  … ${int.to_string(list.len(commits) - 60)} more (vault)") else ()
+  some(list.join(out, "\n"))
+}
+
+fn parse_commit(seg: List[String]) -> Commit = {
+  let first = (pred: fn(String) -> Bool) => list.find(seg, pred) ?? ""
+  let author_line = first((l) => string.starts_with(l, "Author: "))
+  let date_line = first((l) => string.starts_with(l, "Date: "))
+  let subject_line = first((l) => string.starts_with(l, "    ") and string.trim(l) != "")
+  let stat_line = first((l) => regex.is_match("^ [0-9]+ files? changed", l))
+  Commit {
+    sha: string.take(string.drop(list.get(seg, 0) ?? "", 7), 7),
+    author: if author_line == "" then "" else string.trim(regex.replace(" <.*>$", string.drop(author_line, 8), "")),
+    date: if date_line == "" then "" else short_date(string.trim(string.drop(date_line, 6))),
+    subject: string.trim(subject_line),
+    stat: string.trim(stat_line),
+  }
+}
+
+// "Sun Sep 6 09:27:58 2026 +0900" → "2026-Sep-06"; ISO dates pass through their date part.
+fn short_date(d: String) -> String = {
+  let t = string.split(d, " ") |> list.filter((x) => x != "")
+  if list.len(t) >= 5 and regex.is_match("^[0-9]{4}$", list.get(t, 4) ?? "") then {
+    let day = list.get(t, 2) ?? ""
+    "${list.get(t, 4) ?? ""}-${list.get(t, 1) ?? ""}-${if string.len(day) == 1 then "0" + day else day}"
+  } else string.take(d, 10)
+}
+
+// ── tests ─────────────────────────────────────────────────────────────────
+test "detect git kinds" {
+  assert_eq(detect("git diff HEAD", ""), Diff)
+  assert_eq(detect("git log -p -3", ""), Diff)
+  assert_eq(detect("git log --oneline", ""), Log)
+  assert_eq(detect("git status", ""), Status)
+  assert_eq(detect("make show", "diff --git a/x b/x\n"), Diff)
+  assert_eq(detect("ls", "x"), NotGit)
+}
+
+test "diff fixture: file table, noisy files stat-only, squeezed hunks" {
+  let text = fs.read_text("tests/fixtures/git_diff.txt")!
+  let files = parse_diff(text)
+  assert_eq(list.len(files), 8)
+  let s = diff(text, 20) ?? ""
+  assert(string.contains(s, "git diff: 8 files, +"))
+  assert(string.contains(s, "R  src/rename_me.rs → src/renamed.rs"))
+  assert(string.contains(s, "B  logo.png"))
+  assert(string.contains(s, "lockfile — hunks omitted"))
+  assert(string.contains(s, "D  src/old.rs"))
+  assert(string.contains(s, "── src/lower.rs @@ -3 +3 @@ fn f1() -> i32 { 1 } ──"))
+  assert(string.contains(s, "+fn f5() -> i32 { 500 } // changed"))
+  assert(not string.contains(s, "fn f2() -> i32 { 2 }"))   // context 3 lines away is dropped
+  assert(not string.contains(s, "node_modules/p2"))        // lockfile hunk never rendered
+  assert(string.len(s) < string.len(text) / 4)
+}
+
+test "squeeze keeps one context line and marks gaps" {
+  let h = [" a", " b", "-c", "+C", " d", " e", " f", " g", "+h", " i"]
+  assert_eq(squeeze_hunk(h, 50), [" b", "-c", "+C", " d", "  ⋮", " g", "+h", " i"])
+}
+
+test "status fixture" {
+  let s = status(fs.read_text("tests/fixtures/git_status.txt")!) ?? ""
+  assert(string.contains(s, "git status: main"))
+  assert(string.contains(s, "staged (7): M logo.png, M package-lock.json, M src/lower.rs, A src/new.rs, D src/old.rs, R src/rename_me.rs → src/renamed.rs, A untracked.txt"))
+  assert(string.contains(s, "unstaged (1): M README.md"))
+}
+
+test "log fixture: one line per commit, stat appended" {
+  let s = log(fs.read_text("tests/fixtures/git_log.txt")!) ?? ""
+  assert(string.contains(s, "git log: 2 commits"))
+  assert(string.contains(s, "6b50c2c  2026-Sep-06  fx  second commit: tweak docs"))
+  assert(string.contains(s, "initial import  [6 files changed, 685 insertions(+)]"))
+}
+
+test "non-git text yields none" {
+  assert(option.is_none(diff("hello", 20)))
+  assert(option.is_none(status("hello")))
+  assert(option.is_none(log("hello")))
+}

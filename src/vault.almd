@@ -1,0 +1,121 @@
+// vault — raw tool output lives here, outside the model's context.
+//
+//   <home>/store/<id>.txt   raw text, content-addressed (id = sha256 prefix → dedup for free)
+//   <home>/index.jsonl      one JSON line per vaulted output (append-only)
+//   <home>/debug/           raw hook stdin dumps when CTXGATE_DEBUG=1
+import fs
+import env
+import hash
+import json
+import value
+import self.config
+
+let ID_LEN = 12
+
+type Entry = {
+  id: String,
+  ts: Int,
+  session: String,
+  tool: String,
+  label: String,   // command / file path / query — whatever identifies the call
+  bytes: Int,
+  lines: Int,
+  kept: Int,       // bytes of the replacement the model actually saw
+}
+
+fn store_dir(cfg: config.Config) -> String = "${cfg.home}/store"
+fn index_path(cfg: config.Config) -> String = "${cfg.home}/index.jsonl"
+fn entry_path(cfg: config.Config, id: String) -> String = "${store_dir(cfg)}/${id}.txt"
+
+fn id_of(raw: String) -> String = string.take(hash.sha256_hex(raw), ID_LEN)
+
+fn entry_to_value(e: Entry) -> Value = value.object([
+  ("id", value.str(e.id)),
+  ("ts", value.int(e.ts)),
+  ("session", value.str(e.session)),
+  ("tool", value.str(e.tool)),
+  ("label", value.str(e.label)),
+  ("bytes", value.int(e.bytes)),
+  ("lines", value.int(e.lines)),
+  ("kept", value.int(e.kept)),
+])
+
+fn entry_from_value(v: Value) -> Entry = Entry {
+  id: json.get_string(v, "id") ?? "",
+  ts: json.get_int(v, "ts") ?? 0,
+  session: json.get_string(v, "session") ?? "",
+  tool: json.get_string(v, "tool") ?? "",
+  label: json.get_string(v, "label") ?? "",
+  bytes: json.get_int(v, "bytes") ?? 0,
+  lines: json.get_int(v, "lines") ?? 0,
+  kept: json.get_int(v, "kept") ?? 0,
+}
+
+// Store raw text; returns its id. Idempotent for identical content.
+effect fn put(cfg: config.Config, raw: String) -> String = {
+  fs.mkdir_p(store_dir(cfg))!
+  let id = id_of(raw)
+  let path = entry_path(cfg, id)
+  if fs.exists(path) then () else fs.write(path, raw)!
+  id
+}
+
+effect fn record(cfg: config.Config, e: Entry) -> Unit = {
+  fs.mkdir_p(cfg.home)!
+  fs.append(index_path(cfg), json.stringify(entry_to_value(e)) + "\n")!
+}
+
+effect fn get(cfg: config.Config, id: String) -> Result[String, String] = {
+  let path = entry_path(cfg, id)
+  guard fs.exists(path) else err("no vault entry ${id} (looked in ${path})")
+  fs.read_text(path)
+}
+
+// Resolve a possibly-abbreviated id (prefix match over the store).
+effect fn resolve(cfg: config.Config, prefix: String) -> Result[String, String] = {
+  guard not fs.exists(entry_path(cfg, prefix)) else ok(prefix)
+  let names = fs.list_dir(store_dir(cfg)) ?? []
+  let hits = names
+    |> list.filter((n) => string.starts_with(n, prefix) and string.ends_with(n, ".txt"))
+    |> list.map((n) => string.slice(n, 0, string.len(n) - 4))
+  match list.len(hits) {
+    0 => err("no vault entry matching '${prefix}'"),
+    1 => ok(list.get(hits, 0) ?? prefix),
+    n => err("ambiguous id '${prefix}' (${int.to_string(n)} matches): ${list.join(hits, ", ")}"),
+  }
+}
+
+effect fn entries(cfg: config.Config) -> List[Entry] = {
+  let lines = fs.read_lines_if_exists(index_path(cfg)) ?? none
+  match lines {
+    none => [],
+    some(ls) => ls
+      |> list.filter((l) => string.trim(l) != "")
+      |> list.filter_map((l) => match json.parse(l) {
+        ok(v) => some(entry_from_value(v)),
+        err(_) => none,
+      }),
+  }
+}
+
+effect fn debug_dump(cfg: config.Config, event: String, raw: String) -> Unit = {
+  if cfg.debug then {
+    let dir = "${cfg.home}/debug"
+    fs.mkdir_p(dir)!
+    fs.write("${dir}/${event}-${int.to_string(env.millis())}.json", raw)!
+  } else ()
+}
+
+test "id is a stable 12-hex prefix" {
+  assert_eq(string.len(id_of("hello")), 12)
+  assert_eq(id_of("hello"), id_of("hello"))
+  assert_ne(id_of("hello"), id_of("hello!"))
+}
+
+test "entry round-trips through json" {
+  let e = Entry { id: "abc", ts: 1, session: "s", tool: "Bash", label: "ls", bytes: 10, lines: 2, kept: 5 }
+  let back = entry_from_value(entry_to_value(e))
+  assert_eq(back.id, "abc")
+  assert_eq(back.bytes, 10)
+  assert_eq(back.label, "ls")
+}

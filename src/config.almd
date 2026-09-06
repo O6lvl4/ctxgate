@@ -1,0 +1,78 @@
+// config — thresholds and paths. Every knob is overridable via CTXGATE_* env vars
+// so behaviour can be tuned per shell without a config file (v0.1 has none).
+import env
+import fs
+
+type Config = {
+  home: String,          // vault root: $CTXGATE_HOME or ~/.ctxgate
+  max_bash: Int,         // Bash stdout above this many bytes is vaulted + compressed
+  max_read: Int,         // Read
+  max_grep: Int,         // Grep / Glob
+  max_other: Int,        // MCP tools, WebFetch, anything else
+  head: Int,             // lines kept from the top
+  tail: Int,             // lines kept from the bottom
+  salient: Int,          // max salient (error-ish) lines surfaced
+  line_clip: Int,        // longer lines are clipped in the summary
+  grep_head_limit: Int,  // injected into Grep calls that carry no head_limit
+  outline_bin: String,   // tree-sitter helper for non-.almd files (CTXGATE_OUTLINE_BIN)
+  outline_max: Int,      // max symbols listed in a Read replacement
+  max_block: Int,        // max lines kept per failure stanza (test/build summaries)
+  window: Int,           // model context window in tokens (CTXGATE_WINDOW; auto: 1M if model has "[1m]")
+  lvl_compress: Int,     // % of window at which COMPRESS starts (CTXGATE_LVL_COMPRESS)
+  lvl_aggressive: Int,   // … AGGRESSIVE
+  lvl_isolate: Int,      // … ISOLATE
+  dedup_min: Int,        // outputs at least this big take part in session dedup (0 disables)
+  diff_max_cells: Int,   // LCS budget for "changed since last seen" diffs
+  rtk_bin: String,       // rtk binary for Bash rewrites ("" = off; CTXGATE_RTK=0 or CTXGATE_RTK_BIN)
+  debug: Bool,           // CTXGATE_DEBUG=1 dumps raw hook stdin under <home>/debug
+}
+
+// Claude Code's 1M-context models are selected as "<model>[1m]" in ~/.claude/settings.json.
+effect fn detect_window(home_dir: String) -> Int = {
+  let settings = match fs.read_text_if_exists("${home_dir}/.claude/settings.json") {
+    ok(some(t)) => t,
+    _ => "",
+  }
+  if string.contains(settings, "[1m]") then 1_000_000 else 200_000
+}
+
+effect fn env_int(name: String, default: Int) -> Int = match env.get(name) {
+  some(s) => int.parse(string.trim(s)) ?? default,
+  none => default,
+}
+
+effect fn load() -> Config = {
+  let home_dir = env.get("HOME") ?? "/tmp"
+  let home = env.get("CTXGATE_HOME") ?? "${home_dir}/.ctxgate"
+  Config {
+    home: home,
+    max_bash: env_int("CTXGATE_MAX_BASH", 8000)!,
+    max_read: env_int("CTXGATE_MAX_READ", 12000)!,
+    max_grep: env_int("CTXGATE_MAX_GREP", 8000)!,
+    max_other: env_int("CTXGATE_MAX_OTHER", 10000)!,
+    head: env_int("CTXGATE_HEAD", 30)!,
+    tail: env_int("CTXGATE_TAIL", 30)!,
+    salient: env_int("CTXGATE_SALIENT", 40)!,
+    line_clip: env_int("CTXGATE_LINE_CLIP", 200)!,
+    grep_head_limit: env_int("CTXGATE_GREP_HEAD_LIMIT", 60)!,
+    outline_bin: env.get("CTXGATE_OUTLINE_BIN") ?? "ctxgate-outline",
+    outline_max: env_int("CTXGATE_OUTLINE_MAX", 120)!,
+    max_block: env_int("CTXGATE_MAX_BLOCK", 20)!,
+    window: env_int("CTXGATE_WINDOW", detect_window(home_dir)!)!,
+    lvl_compress: env_int("CTXGATE_LVL_COMPRESS", 40)!,
+    lvl_aggressive: env_int("CTXGATE_LVL_AGGRESSIVE", 60)!,
+    lvl_isolate: env_int("CTXGATE_LVL_ISOLATE", 75)!,
+    dedup_min: env_int("CTXGATE_DEDUP_MIN", 600)!,
+    diff_max_cells: env_int("CTXGATE_DIFF_MAX_CELLS", 4_000_000)!,
+    rtk_bin: if (env.get("CTXGATE_RTK") ?? "1") == "0" then "" else env.get("CTXGATE_RTK_BIN") ?? "rtk",
+    debug: (env.get("CTXGATE_DEBUG") ?? "") == "1",
+  }
+}
+
+// Byte budget for a given tool name.
+fn budget_for(cfg: Config, tool: String) -> Int = match tool {
+  "Bash" => cfg.max_bash,
+  "Read" => cfg.max_read,
+  "Grep" | "Glob" => cfg.max_grep,
+  _ => cfg.max_other,
+}

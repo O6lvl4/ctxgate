@@ -1,0 +1,4 @@
+[package]
+name = "ctxgate"
+version = "0.7.0"
+edition = "2026"

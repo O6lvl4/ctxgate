@@ -1,0 +1,146 @@
+// dedup — session memory of what the model has already seen.
+//
+//   key = tool + label  (Read: file path · Bash: command · Grep: pattern+path · MCP: input)
+//   <home>/sessions/<sid>.seen.jsonl   append-only: {key, id, ts}; last line per key wins
+//
+// Decision for a new output under a key seen before:
+//   Same     identical content (same vault id)           → one line: "unchanged"
+//   Changed  different content, diff small enough        → the diff only
+//   Fresh    never seen / diff too large or too noisy    → normal pipeline
+// Compaction wipes the model's memory, so budget.record clears the seen file when usage drops.
+import fs
+import json
+import value
+import env
+import self.config
+import self.vault
+import self.textdiff
+import self.gitout
+import self.compress
+
+type Seen = { key: String, id: String, ts: Int }
+
+type Verdict =
+  | Same(String)              // previous id
+  | Changed(String, String)   // previous id, rendered diff view
+  | Fresh
+
+fn seen_path(cfg: config.Config, sid: String) -> String = "${cfg.home}/sessions/${sid}.seen.jsonl"
+
+fn key_of(tool: String, label: String) -> String = "${tool}:${label}"
+
+effect fn last_seen(cfg: config.Config, sid: String, key: String) -> Option[Seen] = {
+  let lines: List[String] = match fs.read_lines_if_exists(seen_path(cfg, sid)) {
+    ok(some(ls)) => ls,
+    _ => [],
+  }
+  list.reverse(lines) |> list.filter_map((l) => match json.parse(l) {
+    ok(j) => if (json.get_string(j, "key") ?? "") == key
+      then some(Seen { key: key, id: json.get_string(j, "id") ?? "", ts: json.get_int(j, "ts") ?? 0 })
+      else none,
+    err(_) => none,
+  }) |> list.first
+}
+
+effect fn remember(cfg: config.Config, sid: String, key: String, id: String) -> Unit = {
+  guard sid != "" else ()
+  fs.mkdir_p("${cfg.home}/sessions")!
+  fs.append(seen_path(cfg, sid), json.stringify(value.object([
+    ("key", value.str(key)), ("id", value.str(id)), ("ts", value.int(env.unix_timestamp())),
+  ])) + "\n")!
+}
+
+effect fn forget_session(cfg: config.Config, sid: String) -> Unit = {
+  let p = seen_path(cfg, sid)
+  if fs.exists(p) then fs.remove(p)! else ()
+}
+
+// Decide what to show for `text` under `key`. Always vaults `text` (content-addressed, so a
+// repeat costs nothing) so the next call has a diff base.
+effect fn check(cfg: config.Config, sid: String, tool: String, label: String, text: String) -> (String, Verdict) = {
+  let id = vault.put(cfg, text)!
+  guard sid != "" and cfg.dedup_min > 0 and string.len(text) >= cfg.dedup_min else (id, Fresh)
+  let key = key_of(tool, label)
+  let verdict = match last_seen(cfg, sid, key) ?? none {
+    none => Fresh,
+    some(prev) => if prev.id == id then Same(prev.id)
+      else match vault.get(cfg, prev.id) {
+        err(_) => Fresh,
+        ok(old) => match textdiff.diff(old, text, cfg.diff_max_cells) {
+          none => Fresh,
+          some(d) => {
+            let view = render_diff(tool, label, prev.id, id, text, d, cfg.max_block)
+            // only worth it when the diff is clearly smaller than the content itself
+            if string.len(view) * 10 < string.len(text) * 6 then Changed(prev.id, view) else Fresh
+          },
+        },
+      },
+  }
+  remember(cfg, sid, key, id)!
+  (id, verdict)
+}
+
+fn render_same(tool: String, label: String, id: String, text: String) -> String =
+  "[ctxgate] ${tool} ${compress.clip(label, 160)}: unchanged since you last saw it this session (${int.to_string(compress.line_count(text))} lines / ${compress.human_bytes(string.len(text))}, ctx:${id}). Not repeated; ctxgate show ${id} if you need it again."
+
+fn render_diff(tool: String, label: String, old_id: String, new_id: String, text: String, d: textdiff.LineDiff, max_block: Int) -> String = {
+  var out: List[String] = []
+  list.push(out, "[ctxgate] ${tool} ${compress.clip(label, 160)}: changed since you last saw it — +${int.to_string(d.added)} −${int.to_string(d.removed)} lines of ${int.to_string(compress.line_count(text))} (ctx:${old_id} → ctx:${new_id}). Only the diff is shown; the rest is as before.")
+  list.push(out, "  full current text: ctxgate show ${new_id}   |   Read offset/limit")
+  // split into hunks at runs of unchanged lines, then squeeze each to ±1 context
+  var hunk: List[String] = []
+  var line_no = 0
+  var hunk_start = 1
+  var in_hunk = false
+  var gap = 0
+  var used = 0
+  let budget = max_block * 15
+  for l in d.lines {
+    let is_change = string.starts_with(l, "+") or string.starts_with(l, "-")
+    if not string.starts_with(l, "+") then line_no = line_no + 1 else ()
+    if is_change then {
+      if not in_hunk then { hunk_start = int.max(1, line_no - 1); in_hunk = true } else ()
+      gap = 0
+      list.push(hunk, l)
+    } else if in_hunk then {
+      gap = gap + 1
+      list.push(hunk, l)
+      if gap > 2 then {
+        if used < budget then {
+          list.push(out, "── @@ L${int.to_string(hunk_start)} ──")
+          let body = gitout.squeeze_hunk(hunk, max_block)
+          for b in body { list.push(out, "  " + b) }
+          used = used + list.len(body) + 1
+        } else ()
+        hunk = []
+        in_hunk = false
+      } else ()
+    } else if list.len(hunk) < 1 then { hunk = [l] } else { hunk = [l] }
+  }
+  if in_hunk and used < budget then {
+    list.push(out, "── @@ L${int.to_string(hunk_start)} ──")
+    for b in gitout.squeeze_hunk(hunk, max_block) { list.push(out, "  " + b) }
+  } else ()
+  if used >= budget then list.push(out, "── … more changes omitted (line budget; ctxgate show ${new_id}) ──") else ()
+  list.join(out, "\n")
+}
+
+test "key and same-render" {
+  assert_eq(key_of("Read", "/a/b.rs"), "Read:/a/b.rs")
+  let s = render_same("Read", "/a/b.rs", "abc", "x\ny")
+  assert(string.contains(s, "unchanged since you last saw it"))
+  assert(string.contains(s, "ctx:abc"))
+}
+
+test "render_diff shows only the changed region with context" {
+  let old = list.range(0, 40) |> list.map((i) => "line ${int.to_string(i)}") |> list.join("\n")
+  let new = string.replace(old, "line 20", "line twenty")
+  let d = textdiff.diff(old, new, 100000) ?? textdiff.no_diff()
+  let v = render_diff("Read", "/f.txt", "old1", "new1", new, d, 20)
+  assert(string.contains(v, "+1 −1 lines of 40"))
+  assert(string.contains(v, "-line 20"))
+  assert(string.contains(v, "+line twenty"))
+  assert(string.contains(v, " line 19"))
+  assert(not string.contains(v, "line 5"))
+  assert(string.len(v) < string.len(new))
+}

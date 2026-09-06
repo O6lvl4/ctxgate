@@ -1,0 +1,130 @@
+// compress — pure text summarisation. No IO here so every function is unit-testable.
+//
+// Strategy (v0.1, tool-agnostic):
+//   1. salient lines  — anything that smells like an error / failure, with line numbers
+//   2. head           — first N lines
+//   3. tail           — last N lines
+// Everything else is elided with an explicit "(K lines omitted)" marker so the model
+// knows the gap exists and can fetch it from the vault.
+
+let SALIENT_MARKERS = [
+  "error", "fail", "panic", "warning", "exception", "fatal", "traceback",
+  "not ok", "✗", "denied", "unresolved", "cannot", "undefined", "mismatch",
+]
+
+let NOISE_MARKERS = ["0 errors", "no errors", "0 failed", "0 warnings", "errors: 0", "failed: 0"]
+
+fn is_salient(line: String) -> Bool = {
+  let l = string.to_lower(line)
+  if list.any(NOISE_MARKERS, (m) => string.contains(l, m)) then false
+  else list.any(SALIENT_MARKERS, (m) => string.contains(l, m))
+}
+
+fn clip(line: String, max: Int) -> String =
+  if string.len(line) > max then string.take(line, max) + " …" else line
+
+fn pad_left(s: String, width: Int) -> String =
+  if string.len(s) >= width then s else string.repeat(" ", width - string.len(s)) + s
+
+fn numbered(i: Int, line: String, width: Int, clip_at: Int) -> String =
+  "${pad_left(int.to_string(i), width)}│ ${clip(line, clip_at)}"
+
+fn digits(n: Int) -> Int = string.len(int.to_string(n))
+
+fn human_bytes(n: Int) -> String =
+  if n >= 1_048_576 then "${int.to_string(n / 1_048_576)}.${int.to_string((n % 1_048_576) * 10 / 1_048_576)} MB"
+  else if n >= 1024 then "${int.to_string(n / 1024)} KB"
+  else "${int.to_string(n)} B"
+
+// Count of lines in `text` (a trailing newline does not add an empty line).
+fn line_count(text: String) -> Int = list.len(string.lines(text))
+
+type Summary = {
+  total_lines: Int,
+  bytes: Int,
+  salient: List[String],   // rendered, numbered
+  head: List[String],
+  omitted: Int,            // lines between head and tail that were dropped
+  tail: List[String],
+}
+
+fn summarize(text: String, head_n: Int, tail_n: Int, max_salient: Int, clip_at: Int) -> Summary = {
+  let lines = string.lines(text)
+  let total = list.len(lines)
+  let width = digits(total)
+  let numbered_all = list.enumerate(lines) |> list.map((p) => (p.0 + 1, p.1))
+
+  let salient_all = list.filter(numbered_all, (p) => is_salient(p.1))
+  let salient = list.take(salient_all, max_salient)
+    |> list.map((p) => numbered(p.0, p.1, width, clip_at))
+
+  // If head + tail already cover everything, show it all instead of eliding.
+  let fits = total <= head_n + tail_n
+  let head_lines = if fits then numbered_all else list.take(numbered_all, head_n)
+  let tail_lines = if fits then [] else list.drop(numbered_all, total - tail_n)
+  let omitted = if fits then 0 else total - head_n - tail_n
+
+  Summary {
+    total_lines: total,
+    bytes: string.len(text),
+    salient: salient,
+    head: list.map(head_lines, (p) => numbered(p.0, p.1, width, clip_at)),
+    omitted: omitted,
+    tail: list.map(tail_lines, (p) => numbered(p.0, p.1, width, clip_at)),
+  }
+}
+
+// Render the model-facing replacement for a vaulted output.
+fn render(tool: String, label: String, id: String, s: Summary) -> String = {
+  var out: List[String] = []
+  list.push(out, "[ctxgate] ${tool} output: ${int.to_string(s.total_lines)} lines / ${human_bytes(s.bytes)} → vaulted as ctx:${id} (NOT in context).")
+  if label != "" then list.push(out, "  source: ${clip(label, 220)}") else ()
+  list.push(out, "  retrieve: ctxgate show ${id} --grep <re> | --around <re> [n] | --lines A-B | --head N | --tail N")
+  if list.is_empty(s.salient) then ()
+  else {
+    list.push(out, "── salient (${int.to_string(list.len(s.salient))}) ──")
+    for l in s.salient { list.push(out, l) }
+  }
+  list.push(out, "── head ──")
+  for l in s.head { list.push(out, l) }
+  if s.omitted > 0 then {
+    list.push(out, "   ⋮  (${int.to_string(s.omitted)} lines omitted — in the vault)")
+    list.push(out, "── tail ──")
+    for l in s.tail { list.push(out, l) }
+  } else ()
+  list.join(out, "\n")
+}
+
+test "salient detects errors and ignores zero-count noise" {
+  assert(is_salient("error[E0308]: mismatched types"))
+  assert(is_salient("--- FAIL: TestFoo"))
+  assert(not is_salient("test result: ok. 0 failed"))
+  assert(not is_salient("compiling foo v0.1"))
+}
+
+test "summarize elides the middle" {
+  let text = list.range(1, 101) |> list.map((i) => "line ${int.to_string(i)}") |> list.join("\n")
+  let s = summarize(text, 5, 5, 10, 200)
+  assert_eq(s.total_lines, 100)
+  assert_eq(list.len(s.head), 5)
+  assert_eq(list.len(s.tail), 5)
+  assert_eq(s.omitted, 90)
+}
+
+test "summarize shows everything when small" {
+  let s = summarize("a\nb\nc", 5, 5, 10, 200)
+  assert_eq(s.omitted, 0)
+  assert_eq(list.len(s.head), 3)
+  assert_eq(list.len(s.tail), 0)
+}
+
+test "clip shortens long lines" {
+  assert_eq(clip("abcdef", 3), "abc …")
+  assert_eq(clip("abc", 3), "abc")
+}
+
+test "human_bytes" {
+  assert_eq(human_bytes(512), "512 B")
+  assert_eq(human_bytes(2048), "2 KB")
+  assert_eq(human_bytes(1_572_864), "1.5 MB")
+}

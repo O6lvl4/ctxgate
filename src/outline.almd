@@ -1,0 +1,167 @@
+// outline — a file's table of contents: symbol kind, name, line range.
+//
+//   .almd files      parsed here, in Almide (top-level fn / effect fn / type / protocol / let / test)
+//   everything else  delegated to `ctxgate-outline` (tree-sitter, Rust) over a JSON contract:
+//                    {"path","lang","total_lines","symbols":[{"kind","name","start","end"}]}
+//   The helper is the one non-Almide piece of ctxgate; it is replaced by the Almide
+//   tree-sitter when that lands, and only this module knows it exists.
+import process
+import json
+import fs
+import regex
+import self.config
+import self.compress
+
+type Sym = { kind: String, name: String, start: Int, end: Int }
+type Outline = { lang: String, total_lines: Int, symbols: List[Sym] }
+
+let EMPTY = Outline { lang: "unknown", total_lines: 0, symbols: [] }
+
+// ── .almd (pure) ──────────────────────────────────────────────────────────
+// A declaration starts at column 0; its range runs to the line before the next one.
+fn almd_decl(line: String) -> Option[(String, String)] = {
+  if string.starts_with(line, "effect fn ") then some(("effect fn", almd_name(string.drop(line, 10))))
+  else if string.starts_with(line, "fn ") then some(("fn", almd_name(string.drop(line, 3))))
+  else if string.starts_with(line, "type ") then some(("type", almd_name(string.drop(line, 5))))
+  else if string.starts_with(line, "protocol ") then some(("protocol", almd_name(string.drop(line, 9))))
+  else if string.starts_with(line, "let ") then some(("let", almd_name(string.drop(line, 4))))
+  else if string.starts_with(line, "test \"") then match string.split_once(string.drop(line, 6), "\"") {
+    some((name, _)) => some(("test", name)),
+    none => none,
+  }
+  else none
+}
+
+// identifier chars, plus `.` for convention methods (`fn Type.method`)
+fn almd_name(rest: String) -> String = regex.find("^[A-Za-z_][A-Za-z0-9_.]*", rest) ?? ""
+
+fn almd_outline(text: String) -> Outline = {
+  let lines = string.lines(text)
+  let total = list.len(lines)
+  let starts = list.enumerate(lines)
+    |> list.filter_map((p) => match almd_decl(p.1) {
+      some((kind, name)) => some((p.0 + 1, kind, name)),
+      none => none,
+    })
+  let symbols = list.enumerate(starts) |> list.map((p) => {
+    let (start, kind, name) = p.1
+    let end = match list.get(starts, p.0 + 1) {
+      some((next, _, _)) => next - 1,
+      none => total,
+    }
+    Sym { kind: kind, name: name, start: start, end: trim_end(lines, start, end) }
+  })
+  Outline { lang: "almide", total_lines: total, symbols: symbols }
+}
+
+// Pull the end line back over trailing blank / comment-only lines so ranges are tight.
+fn trim_end(lines: List[String], start: Int, end: Int) -> Int = {
+  var e = end
+  var go = true
+  while go and e > start {
+    let l = string.trim(list.get(lines, e - 1) ?? "")
+    if l == "" or string.starts_with(l, "//") then e = e - 1 else go = false
+  }
+  e
+}
+
+// ── JSON contract (pure) ──────────────────────────────────────────────────
+fn from_json(text: String) -> Result[Outline, String] = {
+  let j = json.parse(text)!
+  let syms = json.get_array(j, "symbols") ?? []
+  ok(Outline {
+    lang: json.get_string(j, "lang") ?? "unknown",
+    total_lines: json.get_int(j, "total_lines") ?? 0,
+    symbols: list.map(syms, (s) => Sym {
+      kind: json.get_string(s, "kind") ?? "",
+      name: json.get_string(s, "name") ?? "",
+      start: json.get_int(s, "start") ?? 0,
+      end: json.get_int(s, "end") ?? 0,
+    }),
+  })
+}
+
+// ── entry points (effect) ─────────────────────────────────────────────────
+effect fn of_file(cfg: config.Config, path: String) -> Result[Outline, String] = {
+  if string.ends_with(path, ".almd") then ok(almd_outline(fs.read_text(path)!))
+  else {
+    let st = process.exec_status(cfg.outline_bin, [path])
+      |> result.map_err((e) => "running ${cfg.outline_bin}: ${e}")!
+    guard st.code == 0 else err("${cfg.outline_bin} exited ${int.to_string(st.code)}: ${string.trim(st.stderr)}")
+    from_json(st.stdout)
+  }
+}
+
+// ── lookup / render (pure) ────────────────────────────────────────────────
+// Exact name first, then "ends with ::name" / ".name" so `compile` finds `Compiler::compile`.
+fn find(o: Outline, name: String) -> Option[Sym] =
+  match list.find(o.symbols, (s) => s.name == name) {
+    some(s) => some(s),
+    none => list.find(o.symbols, (s) => string.ends_with(s.name, "::" + name) or string.ends_with(s.name, "." + name)),
+  }
+
+// Test code is rarely what a Read is after: when the outline overflows `max`, collapse
+// symbols living under a test module (Rust `mod tests`, `*_test` names) into one line.
+fn is_test_sym(s: Sym) -> Bool =
+  string.starts_with(s.name, "tests::") or string.contains(s.name, "::tests::")
+    or string.starts_with(s.name, "test_") or string.contains(s.name, "::test_")
+    or string.contains(s.name, ".test_") or s.kind == "test"
+
+fn render(o: Outline, max: Int) -> List[String] = {
+  let overflow = list.len(o.symbols) > max
+  let main_syms = if overflow then list.filter(o.symbols, (s) => not is_test_sym(s)) else o.symbols
+  let collapsed = list.len(o.symbols) - list.len(main_syms)
+  let shown = list.take(main_syms, max)
+  let kind_w = list.fold(shown, 4, (w, s) => int.max(w, string.len(s.kind)))
+  let name_w = list.fold(shown, 4, (w, s) => int.max(w, int.min(48, string.len(s.name))))
+  var out: List[String] = []
+  for s in shown {
+    let span = if s.start == s.end then "L${int.to_string(s.start)}" else "L${int.to_string(s.start)}-${int.to_string(s.end)}"
+    list.push(out, "  ${pad_right(s.kind, kind_w)}  ${pad_right(compress.clip(s.name, 48), name_w)}  ${span}")
+  }
+  let rest = list.len(main_syms) - list.len(shown)
+  if rest > 0 then list.push(out, "  … ${int.to_string(rest)} more symbols (ctxgate outline <file>)") else ()
+  if collapsed > 0 then list.push(out, "  … ${int.to_string(collapsed)} test symbols collapsed (ctxgate outline <file>)") else ()
+  out
+}
+
+fn pad_right(s: String, width: Int) -> String =
+  if string.len(s) >= width then s else s + string.repeat(" ", width - string.len(s))
+
+test "almd outline finds top-level decls with tight ranges" {
+  let src = "import fs\n\ntype Point = { x: Int }\n\n// doc\nfn add(a: Int, b: Int) -> Int = a + b\n\neffect fn main() -> Unit = {\n  println(\"hi\")\n}\n\ntest \"adds\" {\n  assert_eq(add(1, 2), 3)\n}\n"
+  let o = almd_outline(src)
+  assert_eq(o.lang, "almide")
+  assert_eq(list.len(o.symbols), 4)
+  let names = list.map(o.symbols, (s) => s.name)
+  assert_eq(names, ["Point", "add", "main", "adds"])
+  match find(o, "main") {
+    some(s) => {
+      assert_eq(s.kind, "effect fn")
+      assert_eq(s.start, 8)
+      assert_eq(s.end, 10)
+    },
+    none => assert(false),
+  }
+}
+
+test "almd convention method keeps the dotted name" {
+  let o = almd_outline("fn Shape.area(s: Shape) -> Float = 1.0\n")
+  assert_eq(list.map(o.symbols, (s) => s.name), ["Shape.area"])
+  assert(option.is_some(find(o, "area")))
+}
+
+test "from_json parses the helper contract" {
+  let o = from_json("{\"path\":\"a.rs\",\"lang\":\"rust\",\"total_lines\":9,\"symbols\":[{\"kind\":\"fn\",\"name\":\"Foo::bar\",\"start\":2,\"end\":5}]}")!
+  assert_eq(o.total_lines, 9)
+  assert_eq(list.len(o.symbols), 1)
+  assert(option.is_some(find(o, "bar")))
+  assert(option.is_none(find(o, "baz")))
+}
+
+test "render caps and reports the remainder" {
+  let syms = list.range(0, 5) |> list.map((i) => Sym { kind: "fn", name: "f${int.to_string(i)}", start: i * 10 + 1, end: i * 10 + 9 })
+  let lines = render(Outline { lang: "rust", total_lines: 50, symbols: syms }, 3)
+  assert_eq(list.len(lines), 4)
+  assert(string.contains(list.get(lines, 3) ?? "", "2 more"))
+}

@@ -1,0 +1,309 @@
+// hook_post — PostToolUse: the model only ever sees a compressed view of big outputs.
+//
+//   tool_response ──► extract text (shape-aware) ──► over budget?
+//        no  → emit nothing (Claude Code passes the original through)
+//        yes → vault raw text, replace it in-place with compress.render(...)
+//              {"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": <response>}}
+//
+// tool_response shapes seen in the wild (token-crunch testdata + Claude Code):
+//   Bash           {"stdout": "...", "stderr": "...", ...}
+//   Read           {"content": "..."}  or  {"file": {"content": "...", ...}}
+//   Grep/Glob/etc  {"content": "..."}  |  {"text": "..."}  |  {"output": "..."}
+//   MCP tools      {"content": [{"type": "text", "text": "..."}, ...]}
+import json
+import value
+import env
+import fs
+import self.config
+import self.compress
+import self.vault
+import self.outline
+import self.testout
+import self.gitout
+import self.dedup
+
+type Shape =
+  | Stdout
+  | FileContent
+  | Content
+  | Text
+  | Output
+  | McpArray
+  | Unknown
+
+// Which key holds the big text, and the text itself.
+fn extract(resp: Value) -> (Shape, String) = {
+  match json.get_string(resp, "stdout") {
+    some(s) => (Stdout, s),
+    none => match value.field(resp, "file")? {
+      some(f) => match json.get_string(f, "content") {
+        some(s) => (FileContent, s),
+        none => (Unknown, ""),
+      },
+      none => match json.get_string(resp, "content") {
+        some(s) => (Content, s),
+        none => match json.get_string(resp, "text") {
+          some(s) => (Text, s),
+          none => match json.get_string(resp, "output") {
+            some(s) => (Output, s),
+            none => match json.get_array(resp, "content") {
+              some(items) => (McpArray, mcp_text(items)),
+              none => (Unknown, ""),
+            },
+          },
+        },
+      },
+    },
+  }
+}
+
+fn mcp_text(items: List[Value]) -> String = items
+  |> list.filter_map((it) => if (json.get_string(it, "type") ?? "") == "text" then json.get_string(it, "text") else none)
+  |> list.join("\n\n")
+
+// Put `replacement` back where the text came from.
+fn replace(resp: Value, shape: Shape, replacement: String) -> Result[Value, String] = {
+  let r = value.str(replacement)
+  match shape {
+    Stdout => json.set_path(resp, json.field(json.root(), "stdout"), r),
+    FileContent => json.set_path(resp, json.field(json.field(json.root(), "file"), "content"), r),
+    Content => json.set_path(resp, json.field(json.root(), "content"), r),
+    Text => json.set_path(resp, json.field(json.root(), "text"), r),
+    Output => json.set_path(resp, json.field(json.root(), "output"), r),
+    McpArray => {
+      let items = json.get_array(resp, "content") ?? []
+      let non_text = list.filter(items, (it) => (json.get_string(it, "type") ?? "") != "text")
+      var rebuilt = list.map(non_text, (it) => it)
+      list.push(rebuilt, value.object([("type", value.str("text")), ("text", r)]))
+      json.set_path(resp, json.field(json.root(), "content"), value.array(rebuilt))
+    },
+    Unknown => err("unknown response shape"),
+  }
+}
+
+// A short human label for the call: the command, file path, or pattern.
+fn label_of(tool: String, input: Value) -> String = match tool {
+  "Bash" => json.get_string(input, "command") ?? "",
+  "Read" => json.get_string(input, "file_path") ?? "",
+  "Grep" => "grep ${json.get_string(input, "pattern") ?? ""} ${json.get_string(input, "path") ?? ""}",
+  "Glob" => "glob ${json.get_string(input, "pattern") ?? ""}",
+  _ => string.take(json.stringify(input), 120),
+}
+
+fn envelope(updated: Value) -> String = json.stringify(value.object([
+  ("hookSpecificOutput", value.object([
+    ("hookEventName", value.str("PostToolUse")),
+    ("updatedToolOutput", updated),
+  ])),
+]))
+
+// Entry point. Never fails: any problem → none → original output passes through.
+effect fn run(cfg: config.Config, raw: String, banner: String) -> Option[String] = match json.parse(raw) {
+  err(_) => none,
+  ok(j) => {
+    let tool = json.get_string(j, "tool_name") ?? ""
+    let input = value.field(j, "tool_input") ?? value.object([])
+    let resp = value.field(j, "tool_response") ?? value.null()
+    let (shape, text) = extract(resp)
+    guard text != "" else none
+    let label = label_of(tool, input)
+    let sid = json.get_string(j, "session_id") ?? ""
+    // Session dedup first: a repeat costs one line, a re-read after an edit costs the diff.
+    let (seen_id, verdict) = dedup.check(cfg, sid, tool, label, text) ?? ("", dedup.Fresh)
+    let short = match verdict {
+      dedup.Same(_) => some(dedup.render_same(tool, label, seen_id, text)),
+      dedup.Changed(_, view) => some(view),
+      dedup.Fresh => none,
+    }
+    match short {
+      some(view) => match replace(resp, shape, if banner == "" then view else banner + "\n" + view) {
+        ok(updated) => {
+          vault.record(cfg, vault.Entry {
+            id: seen_id, ts: env.unix_timestamp(), session: sid, tool: tool, label: label,
+            bytes: string.len(text), lines: compress.line_count(text), kept: string.len(view),
+          }) ?? ()
+          some(envelope(updated))
+        },
+        err(_) => none,
+      },
+      none => {
+        let budget = config.budget_for(cfg, tool)
+        guard string.len(text) > budget else none
+        match vault_and_replace(cfg, j, tool, input, resp, shape, text, banner) {
+      ok(out) => some(out),
+      err(e) => {
+        eprintln("[ctxgate] post hook fell back to original output: ${e}")
+        none
+      },
+    }
+      },
+    }
+  },
+}
+
+// Claude Code persists Bash stdout above ~30 KB to a file and hands the hook only a
+// prefix; the full text lives at tool_response.persistedOutputPath. Vault THAT, so
+// salient-line detection covers the whole output, not just the prefix.
+effect fn full_text(resp: Value, text: String) -> String = match json.get_string(resp, "persistedOutputPath") {
+  some(p) => match fs.read_text_if_exists(p) {
+    ok(some(full)) => full,
+    _ => text,
+  },
+  none => text,
+}
+
+// Rendering profile per situation:
+//   persisted Bash  → Claude Code only shows the first ~2 KB of the replacement, so stay tiny
+//   Read            → source code, not logs: salient matching is noise; show more head
+//   anything else   → configured defaults
+type Profile = { head: Int, tail: Int, salient: Int, clip: Int }
+
+fn profile_for(cfg: config.Config, tool: String, persisted: Bool) -> Profile =
+  if persisted then Profile { head: 6, tail: 6, salient: 12, clip: 110 }
+  else if tool == "Read" then Profile { head: cfg.head + 10, tail: 8, salient: 0, clip: cfg.line_clip }
+  else Profile { head: cfg.head, tail: cfg.tail, salient: cfg.salient, clip: cfg.line_clip }
+
+// For Read, say which window of the file this was so the model can page with offset.
+fn read_window(resp: Value) -> String = match value.field(resp, "file")? {
+  some(f) => {
+    let start = json.get_int(f, "startLine") ?? 1
+    let n = json.get_int(f, "numLines") ?? 0
+    let total = json.get_int(f, "totalLines") ?? n
+    if total > n then " (lines ${int.to_string(start)}-${int.to_string(start + n - 1)} of ${int.to_string(total)}; page with Read offset/limit)" else ""
+  },
+  none => "",
+}
+
+// Read of a source file → table of contents instead of head/tail. The model then pulls
+// exactly the symbol it needs (`ctxgate show <id> --symbol name`) or pages with offset.
+// Returns none when the file has no outline (unknown language, helper missing, no symbols).
+effect fn read_as_outline(cfg: config.Config, path: String, id: String, resp: Value, text: String) -> Option[String] = {
+  guard path != "" else none
+  match outline.of_file(cfg, path) {
+    err(_) => none,
+    ok(o) => {
+      guard not list.is_empty(o.symbols) else none
+      var out: List[String] = []
+      list.push(out, "[ctxgate] Read ${path}: ${int.to_string(o.total_lines)} lines, ${o.lang}, ${int.to_string(list.len(o.symbols))} symbols → vaulted as ctx:${id} (NOT in context)${read_window(resp)}.")
+      list.push(out, "  one symbol: ctxgate show ${id} --symbol <name>   |   a range: Read offset=N limit=M   |   search: ctxgate show ${id} --grep <re>")
+      list.push(out, "── outline ──")
+      for l in outline.render(o, cfg.outline_max) { list.push(out, l) }
+      let head = compress.summarize(text, 12, 0, 0, cfg.line_clip)
+      list.push(out, "── head ──")
+      for l in head.head { list.push(out, l) }
+      some(list.join(out, "\n"))
+    },
+  }
+}
+
+// The chain of structured Bash summarizers: test/build runners, then git. Each is pure and
+// answers none when the text is not its kind. Returns (kind label, body).
+fn bash_summary(cfg: config.Config, command: String, text: String) -> Option[(String, String)] = {
+  let runner = testout.detect(command, text)
+  match testout.summarize(runner, text, cfg.max_block) {
+    some(body) => some((testout.name(runner), body)),
+    none => {
+      let kind = gitout.detect(command, text)
+      match gitout.summarize(kind, text, cfg.max_block) {
+        some(body) => some((gitout.name(kind), body)),
+        none => none,
+      }
+    },
+  }
+}
+
+// Bash output from a known test/build runner → that runner's structured summary
+// (totals, failed names, failure stanzas) instead of head/tail. Pure; none = not a runner.
+fn bash_as_runner(cfg: config.Config, command: String, id: String, text: String) -> Option[String] = {
+  match bash_summary(cfg, command, text) {
+    none => none,
+    some((kind, body)) => some(list.join([
+      "[ctxgate] ${kind} output: ${int.to_string(compress.line_count(text))} lines / ${compress.human_bytes(string.len(text))} → vaulted as ctx:${id} (NOT in context).",
+      "  source: ${compress.clip(command, 220)}",
+      "  full text: ctxgate show ${id} --grep <re> | --around <re> [n] | --lines A-B",
+      body,
+    ], "\n")),
+  }
+}
+
+effect fn vault_and_replace(cfg: config.Config, j: Value, tool: String, input: Value, resp: Value, shape: Shape, prefix_text: String, banner: String) -> Result[String, String] = {
+  let persisted = option.is_some(json.get_string(resp, "persistedOutputPath"))
+  let text = full_text(resp, prefix_text)!
+  let id = vault.put(cfg, text)!
+  let label = label_of(tool, input)
+  let as_outline = if tool == "Read" then read_as_outline(cfg, label, id, resp, text) ?? none else none
+  let as_runner = if tool == "Bash" then bash_as_runner(cfg, label, id, text) else none
+  let rendered = match as_outline {
+    some(r) => r,
+    none => match as_runner {
+      some(r) => r,
+      none => {
+      let p = profile_for(cfg, tool, persisted)
+      let summary = compress.summarize(text, p.head, p.tail, p.salient, p.clip)
+        compress.render(tool, label + read_window(resp), id, summary)
+      },
+    },
+  }
+  let rendered_b = if banner == "" then rendered else banner + "\n" + rendered
+  let updated = replace(resp, shape, rendered_b)!
+  vault.record(cfg, vault.Entry {
+    id: id,
+    ts: env.unix_timestamp(),
+    session: json.get_string(j, "session_id") ?? "",
+    tool: tool,
+    label: label,
+    bytes: string.len(text),
+    lines: compress.line_count(text),
+    kept: string.len(rendered_b),
+  })!
+  ok(envelope(updated))
+}
+
+test "extract finds bash stdout" {
+  let resp = value.object([("stdout", value.str("hi")), ("stderr", value.str(""))])
+  let (shape, text) = extract(resp)
+  assert_eq(text, "hi")
+  assert_eq(shape, Stdout)
+}
+
+test "extract finds nested read file content" {
+  let resp = value.object([("file", value.object([("content", value.str("body")), ("numLines", value.int(1))]))])
+  let (shape, text) = extract(resp)
+  assert_eq(text, "body")
+  assert_eq(shape, FileContent)
+}
+
+test "extract joins mcp text items" {
+  let resp = value.object([("content", value.array([
+    value.object([("type", value.str("image")), ("data", value.str("x"))]),
+    value.object([("type", value.str("text")), ("text", value.str("a"))]),
+    value.object([("type", value.str("text")), ("text", value.str("b"))]),
+  ]))])
+  let (shape, text) = extract(resp)
+  assert_eq(text, "a\n\nb")
+  assert_eq(shape, McpArray)
+}
+
+test "replace keeps sibling fields" {
+  let resp = value.object([("stdout", value.str("big")), ("stderr", value.str("warn")), ("interrupted", value.bool(false))])
+  let out = replace(resp, Stdout, "small")!
+  assert_eq(json.get_string(out, "stdout"), some("small"))
+  assert_eq(json.get_string(out, "stderr"), some("warn"))
+  assert_eq(json.get_bool(out, "interrupted"), some(false))
+}
+
+test "replace rebuilds mcp array with one text item" {
+  let resp = value.object([("content", value.array([
+    value.object([("type", value.str("image"))]),
+    value.object([("type", value.str("text")), ("text", value.str("a"))]),
+  ]))])
+  let out = replace(resp, McpArray, "z")!
+  let items = json.get_array(out, "content") ?? []
+  assert_eq(list.len(items), 2)
+  assert_eq(mcp_text(items), "z")
+}
+
+test "label_of picks the identifying field" {
+  assert_eq(label_of("Bash", value.object([("command", value.str("cargo test"))])), "cargo test")
+  assert_eq(label_of("Read", value.object([("file_path", value.str("/a/b.rs"))])), "/a/b.rs")
+}

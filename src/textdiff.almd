@@ -1,0 +1,122 @@
+// textdiff — line-based diff of two texts, for "what changed since you last saw this".
+//
+// Strategy: strip the common prefix and suffix (a re-read after a small edit is almost all
+// prefix/suffix), then LCS on the remaining middle. The DP is O(n·m) on the middle only and
+// is refused above `max_cells` so a hook never stalls on two unrelated 50 KB blobs.
+// Output is classic diff lines (` `, `+`, `-`) so gitout.squeeze_hunk can render them.
+
+type LineDiff = { lines: List[String], added: Int, removed: Int }
+
+fn common_prefix(a: List[String], b: List[String]) -> Int = {
+  let n = int.min(list.len(a), list.len(b))
+  var i = 0
+  var go = true
+  while go and i < n {
+    if (list.get(a, i) ?? "") == (list.get(b, i) ?? "") then i = i + 1 else go = false
+  }
+  i
+}
+
+fn common_suffix(a: List[String], b: List[String], limit: Int) -> Int = {
+  let n = int.min(int.min(list.len(a), list.len(b)), limit)
+  let la = list.len(a)
+  let lb = list.len(b)
+  var i = 0
+  var go = true
+  while go and i < n {
+    if (list.get(a, la - 1 - i) ?? "") == (list.get(b, lb - 1 - i) ?? "") then i = i + 1 else go = false
+  }
+  i
+}
+
+// LCS table as one flat List[Int] of (n+1)*(m+1) cells; returns the diff of the middle.
+fn lcs_diff(a: List[String], b: List[String]) -> List[String] = {
+  let n = list.len(a)
+  let m = list.len(b)
+  let w = m + 1
+  var table: List[Int] = list.map(list.range(0, (n + 1) * w), (_) => 0)
+  var i = n - 1
+  while i >= 0 {
+    var j = m - 1
+    while j >= 0 {
+      let v = if (list.get(a, i) ?? "") == (list.get(b, j) ?? "")
+        then (list.get(table, (i + 1) * w + (j + 1)) ?? 0) + 1
+        else int.max(list.get(table, (i + 1) * w + j) ?? 0, list.get(table, i * w + (j + 1)) ?? 0)
+      table[i * w + j] = v
+      j = j - 1
+    }
+    i = i - 1
+  }
+  var out: List[String] = []
+  var x = 0
+  var y = 0
+  while x < n or y < m {
+    if x < n and y < m and (list.get(a, x) ?? "") == (list.get(b, y) ?? "") then {
+      list.push(out, " " + (list.get(a, x) ?? ""))
+      x = x + 1
+      y = y + 1
+    } else if x < n and (y >= m or (list.get(table, (x + 1) * w + y) ?? 0) >= (list.get(table, x * w + (y + 1)) ?? 0)) then {
+      list.push(out, "-" + (list.get(a, x) ?? ""))   // deletions before insertions, like diff(1)
+      x = x + 1
+    } else {
+      list.push(out, "+" + (list.get(b, y) ?? ""))
+      y = y + 1
+    }
+  }
+  out
+}
+
+// none when the middle is too big to diff within `max_cells`.
+fn diff(old: String, new: String, max_cells: Int) -> Option[LineDiff] = {
+  let a = string.lines(old)
+  let b = string.lines(new)
+  let p = common_prefix(a, b)
+  let s = common_suffix(a, b, int.min(list.len(a), list.len(b)) - p)
+  let mid_a = list.slice(a, p, list.len(a) - s)
+  let mid_b = list.slice(b, p, list.len(b) - s)
+  guard (list.len(mid_a) + 1) * (list.len(mid_b) + 1) <= max_cells else none
+  let middle = lcs_diff(mid_a, mid_b)
+  let prefix = list.map(list.slice(a, 0, p), (l) => " " + l)
+  let suffix = list.map(list.slice(a, list.len(a) - s, list.len(a)), (l) => " " + l)
+  let lines = prefix + middle + suffix
+  some(LineDiff {
+    lines: lines,
+    added: list.count(lines, (l) => string.starts_with(l, "+")),
+    removed: list.count(lines, (l) => string.starts_with(l, "-")),
+  })
+}
+
+fn no_diff() -> LineDiff = {
+  var xs: List[String] = []
+  LineDiff { lines: xs, added: 9, removed: 9 }
+}
+
+test "identical texts diff to context only" {
+  let d = diff("a\nb\nc", "a\nb\nc", 10000) ?? no_diff()
+  assert_eq(d.added, 0)
+  assert_eq(d.removed, 0)
+  assert_eq(list.len(d.lines), 3)
+}
+
+test "small edit in the middle" {
+  let d = diff("a\nb\nc\nd\ne", "a\nb\nX\nd\ne", 10000) ?? no_diff()
+  assert_eq(d.added, 1)
+  assert_eq(d.removed, 1)
+  assert_eq(d.lines, [" a", " b", "-c", "+X", " d", " e"])
+}
+
+test "insert and delete" {
+  let d = diff("a\nb\nc", "a\nb\nb2\nc\nc2", 10000) ?? no_diff()
+  assert_eq(d.added, 2)
+  assert_eq(d.removed, 0)
+  let d2 = diff("a\nb\nc\nd", "a\nd", 10000) ?? no_diff()
+  assert_eq(d2.removed, 2)
+  assert_eq(d2.added, 0)
+}
+
+test "refuses oversized middles" {
+  let big_a = list.range(0, 200) |> list.map((i) => "a${int.to_string(i)}") |> list.join("\n")
+  let big_b = list.range(0, 200) |> list.map((i) => "b${int.to_string(i)}") |> list.join("\n")
+  assert(option.is_none(diff(big_a, big_b, 1000)))
+  assert(option.is_some(diff(big_a, big_b, 100000)))
+}
