@@ -211,7 +211,7 @@ seg=$(printf '%s' "$input" | ctxgate statusline 2>/dev/null) && [[ -n "$seg" ]] 
 | 変数 | 既定 | 意味 |
 |---|---|---|
 | `CTXGATE_HOME` | `~/.ctxgate` | vault の場所 |
-| `CTXGATE_MAX_BASH` / `_READ` / `_GREP` / `_OTHER` | 8000 / 12000 / 8000 / 10000 | このバイト数を超えたら退避 |
+| `CTXGATE_MAX_BASH` / `_READ` / `_GREP` / `_OTHER` | 30000 / 1000000 / 30000 / 30000 | NORMAL でこのバイト数を超えたら退避。レベルが上がると 8k/60k/8k/10k → 4k/24k/4k/5k → 3k/12k/3k/3k に下がる |
 | `CTXGATE_HEAD` / `CTXGATE_TAIL` | 30 / 30 | 汎用表示で両端に残す行数 |
 | `CTXGATE_SALIENT` | 40 | 拾う error 系行の上限 |
 | `CTXGATE_LINE_CLIP` | 200 | これより長い行は切る |

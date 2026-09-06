@@ -79,20 +79,25 @@ fn usage_of(cfg: config.Config, used: Int) -> Usage = {
 // plus a retry. What they do is shrink what a replacement shows, cap outlines, and inject Grep
 // limits. Structured views (runner, git, outline) already lose little; the generic head/tail
 // view is where the lines go.
+// NORMAL is turn-safe: nothing the model asked for is withheld (only outputs Claude Code
+// itself would truncate are summarised, plus repeats via dedup). The bench showed why: a
+// summary that makes the model page for the rest costs a whole turn, and a turn re-sends the
+// entire window — far more than any summary saves while the window is small. The levels
+// tighten as the window fills, which is exactly when a saved byte is worth the most.
 fn apply(cfg: config.Config, level: Level) -> config.Config = match level {
   Normal => cfg,
   Compress => config.Config { ...cfg,
-    max_bash: cfg.max_bash * 3 / 4, max_read: cfg.max_read * 3 / 4, max_grep: cfg.max_grep * 3 / 4, max_other: cfg.max_other * 3 / 4,
+    max_bash: int.min(cfg.max_bash, 8000), max_read: int.min(cfg.max_read, 60000), max_grep: int.min(cfg.max_grep, 8000), max_other: int.min(cfg.max_other, 10000),
     head: int.max(15, cfg.head * 2 / 3), tail: int.max(15, cfg.tail * 2 / 3), salient: int.max(20, cfg.salient * 2 / 3),
     outline_max: int.min(cfg.outline_max, 90), max_block: int.min(cfg.max_block, 16), grep_head_limit: 80,
   },
   Aggressive => config.Config { ...cfg,
-    max_bash: cfg.max_bash / 2, max_read: cfg.max_read / 2, max_grep: cfg.max_grep / 2, max_other: cfg.max_other / 2,
+    max_bash: int.min(cfg.max_bash, 4000), max_read: int.min(cfg.max_read, 24000), max_grep: int.min(cfg.max_grep, 4000), max_other: int.min(cfg.max_other, 5000),
     head: 15, tail: 15, salient: 20, line_clip: int.min(cfg.line_clip, 160),
     outline_max: 60, max_block: 12, grep_head_limit: 50,
   },
   Isolate => config.Config { ...cfg,
-    max_bash: int.max(3000, cfg.max_bash / 3), max_read: int.max(8000, cfg.max_read / 3), max_grep: int.max(3000, cfg.max_grep / 3), max_other: int.max(3000, cfg.max_other / 3),
+    max_bash: int.min(cfg.max_bash, 3000), max_read: int.min(cfg.max_read, 12000), max_grep: int.min(cfg.max_grep, 3000), max_other: int.min(cfg.max_other, 3000),
     head: 10, tail: 10, salient: 12, line_clip: 140,
     outline_max: 40, max_block: 8, grep_head_limit: 30,
   },
@@ -207,7 +212,7 @@ effect fn latest_session(cfg: config.Config) -> Option[Value] = {
 }
 
 fn test_cfg() -> config.Config = config.Config {
-  home: "/tmp/ctxgate-test", max_bash: 8000, max_read: 12000, max_grep: 8000, max_other: 10000,
+  home: "/tmp/ctxgate-test", max_bash: 30000, max_read: 1_000_000, max_grep: 30000, max_other: 30000,
   head: 30, tail: 30, salient: 40, line_clip: 200, grep_head_limit: 60,
   outline_bin: "ctxgate-outline", outline_max: 120, max_block: 20,
   window: 200000, lvl_compress: 40, lvl_aggressive: 60, lvl_isolate: 75,

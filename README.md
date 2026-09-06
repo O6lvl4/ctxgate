@@ -239,7 +239,7 @@ Environment variables; there is no config file.
 | Variable | Default | Meaning |
 |---|---|---|
 | `CTXGATE_HOME` | `~/.ctxgate` | vault location |
-| `CTXGATE_MAX_BASH` / `_READ` / `_GREP` / `_OTHER` | 8000 / 12000 / 8000 / 10000 | bytes above which an output is vaulted |
+| `CTXGATE_MAX_BASH` / `_READ` / `_GREP` / `_OTHER` | 30000 / 1000000 / 30000 / 30000 | bytes above which an output is vaulted at NORMAL; the levels lower these to 8k/60k/8k/10k, 4k/24k/4k/5k, 3k/12k/3k/3k |
 | `CTXGATE_HEAD` / `CTXGATE_TAIL` | 30 / 30 | lines kept at each end in the generic view |
 | `CTXGATE_SALIENT` | 40 | max error-like lines surfaced |
 | `CTXGATE_LINE_CLIP` | 200 | longer lines are clipped |

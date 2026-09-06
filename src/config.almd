@@ -48,10 +48,10 @@ effect fn load() -> Config = {
   let home = env.get("CTXGATE_HOME") ?? "${home_dir}/.ctxgate"
   Config {
     home: home,
-    max_bash: env_int("CTXGATE_MAX_BASH", 8000)!,
-    max_read: env_int("CTXGATE_MAX_READ", 24000)!,
-    max_grep: env_int("CTXGATE_MAX_GREP", 8000)!,
-    max_other: env_int("CTXGATE_MAX_OTHER", 10000)!,
+    max_bash: env_int("CTXGATE_MAX_BASH", 30000)!,
+    max_read: env_int("CTXGATE_MAX_READ", 1_000_000)!,
+    max_grep: env_int("CTXGATE_MAX_GREP", 30000)!,
+    max_other: env_int("CTXGATE_MAX_OTHER", 30000)!,
     head: env_int("CTXGATE_HEAD", 30)!,
     tail: env_int("CTXGATE_TAIL", 30)!,
     salient: env_int("CTXGATE_SALIENT", 40)!,
