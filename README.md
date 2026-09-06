@@ -135,32 +135,50 @@ the split for the current session so the number can be read correctly.
 
 `bench/bench.almd` runs the same tasks through `claude -p` with and without ctxgate in fresh
 clones and reads the real usage from the JSON result. Five read-only exploration tasks on the
-rtk codebase (100k lines, 1,700 commits), Sonnet, one run each — so treat single rows as noise
-and the total as the signal:
+rtk codebase (100k lines, 1,700 commits), Sonnet, **three runs per mode**, mean input tokens
+and turns per run. Run-to-run noise is large (the same task ranges 600k–1,000k tokens with
+ctxgate off), so read the totals, not the rows.
 
-| task | off: input tokens / turns | on: input tokens / turns |
+**0.10 defaults (Bash 8 KB / Read 24 KB / Grep 8 KB from the first turn):**
+
+| task | off: tokens / turns | on: tokens / turns |
 |---|---|---|
-| read `main.rs` (4,190 lines) and outline it | 123,715 / 2 | 158,097 / 3 |
-| list `run_*` fns in a 4,720-line file | 99,439 / 3 | 99,468 / 3 |
-| `git log --stat -60` hotspots | 148,469 / 3 | 197,758 / 4 |
-| review `git diff HEAD~8 HEAD` | 383,194 / 7 | 637,751 / 11 |
-| audit `.unwrap()` across `src/` (wide greps) | 1,582,949 / 27 | 743,112 / 28 |
-| **total** | **2,337,766** | **1,836,186 (−21%)** |
+| read `main.rs` (4,190 lines) and outline it | 123,718 / 2.0 | 252,066 / 4.7 |
+| list `run_*` fns in a 4,720-line file | 116,296 / 3.0 | 100,009 / 3.0 |
+| `git log --stat -60` hotspots | 216,778 / 4.3 | 234,868 / 4.7 |
+| review `git diff HEAD~8 HEAD` | 754,510 / 12.0 | 927,638 / 15.0 |
+| audit `.unwrap()` across `src/` (wide greps) | 897,388 / 24.0 | 873,964 / 22.0 |
+| **total (15 runs)** | **6,326,075 · $4.45** | **7,165,640 · $5.53 (+13%)** |
 
-Success was 5/5 in both modes. Two honest notes:
+That is a loss, and the reason is the first row: the outline replaced a Read the model
+needed in full, so it paged through the file and used 4.7 turns instead of 2. Every extra
+turn re-sends the whole window, which is worth more than any summary saves while the window
+is small.
 
-- **Levels do not chase bytes.** Budget levels shrink what a summary shows (head/tail lines, outline length, stanza length) far more than they lower the size at which outputs get replaced, because a 3 KB output is cheaper inline than as a summary plus a retry. The self-tuning loop softens any kind that still misses.
-- **Turns dominate.** Every extra turn re-sends the whole context, so a compressed output that
-  makes the model ask again costs more than the raw output would have. The first run of this
-  benchmark was 6% *worse* than baseline for exactly that reason: paged Reads (`offset`/`limit`)
-  were being deduplicated against the whole-file read, and Grep `head_limit` was injected in
-  `count` mode. Both are fixed; paged Reads now pass through untouched and `head_limit` only
-  applies under budget pressure.
-- **Short tasks are the unfavourable case.** ctxgate's savings compound with session length,
-  because everything it keeps out of the window stays out on every later turn. A 30-turn
-  session with a 4,720-line file in it pays for that file 30 times; a `-p` run pays once. The
-  benchmark above still shows a net gain, but the long-session effect is where the 88% figure
-  from the sessions that built ctxgate comes from.
+**0.11 defaults (NORMAL is turn-safe; levels tighten as the window fills):**
+
+| task | off: tokens / turns | on: tokens / turns |
+|---|---|---|
+| read `main.rs` (4,190 lines) and outline it | 123,665 / 2.0 | 158,469 / 2.3 |
+| list `run_*` fns in a 4,720-line file | 115,986 / 3.0 | 117,400 / 3.0 |
+| `git log --stat -60` hotspots | 217,477 / 4.3 | 166,547 / 3.3 |
+| review `git diff HEAD~8 HEAD` | 801,531 / 12.7 | 844,842 / 14.0 |
+| audit `.unwrap()` across `src/` (wide greps) | 1,029,726 / 42.7 | 1,150,982 / 36.0 |
+| **total (15 runs)** | **6,865,160 · $5.06 · 194 turns** | **7,314,729 · $4.76 · 178 turns (+6% tokens, −6% cost, −8% turns)** |
+
+Success was 15/15 in both modes, both times. The honest reading:
+
+- **On short tasks ctxgate is neutral, by design.** Nothing is replaced until the window
+  passes 40%, so a `-p` run that ends before that looks exactly like the baseline. The
+  differences in the second table are inside the noise.
+- **Summaries that make the model ask again lose.** The first table is the proof, and it is
+  why 0.11 only summarises outputs Claude Code would truncate anyway (persisted >30 KB
+  Bash output, where the model sees 2 KB otherwise) and repeats (dedup) until the window is
+  under pressure.
+- **Where savings can exist is the long session**: after 40% of the window, on every
+  later turn. `ctxgate report` shows how much of the current window is tool output, which
+  is the ceiling. A benchmark that forces the COMPRESS level from the first turn is in
+  `bench/` next; its numbers go here when they are in, good or bad.
 
 Run it yourself: `almide run bench/bench.almd -- --repo <clone> --runs 3 --model sonnet`.
 
