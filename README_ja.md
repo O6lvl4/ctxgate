@@ -74,7 +74,8 @@ Claude Code を再起動するか `/hooks` を実行してください。`ctxgat
 任意で:
 
 ```bash
-# tree-sitter によるシンボル一覧: Rust, Go, TypeScript/TSX, Python, C, C++, Java, Ruby, C#, PHP, Bash, Lua, Kotlin, Swift, Scala（Almide は内蔵）
+# tree-sitter によるシンボル一覧。16 言語は専用ルールを内蔵、残り 371 言語は tree-sitter-language-pack
+# 経由で、初回使用時に grammar をダウンロード（`ctxgate-outline --languages` で一覧）
 git clone https://github.com/O6lvl4/ctxgate && cd ctxgate/tools/ctxgate-outline
 cargo build --release && cp target/release/ctxgate-outline ~/.local/bin/
 

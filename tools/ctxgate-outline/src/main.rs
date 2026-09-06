@@ -8,6 +8,14 @@
 //!
 //!   ctxgate-outline <file>            → {"path","lang","total_lines","symbols":[{kind,name,start,end}]}
 //!   ctxgate-outline --lang rust -     → read source from stdin
+//!   ctxgate-outline --fetch lang…     → download grammars ahead of time
+//!   ctxgate-outline --languages       → what is supported
+//!
+//! 16 languages have hand-written symbol rules and statically linked grammars. Every other
+//! language known to tree-sitter-language-pack (371) is parsed with a grammar downloaded on
+//! first use (cached under the platform cache dir; TREE_SITTER_LANGUAGE_PACK_CACHE_DIR
+//! overrides) and outlined with a generic rule: a named node whose kind says definition /
+//! declaration / function / class … and which has a name.
 //!
 //! Lines are 1-based and inclusive. Exit 0 with an empty `symbols` array for unsupported
 //! languages, so callers can fall back without parsing stderr.
@@ -40,6 +48,8 @@ enum Lang {
     Kotlin,
     Swift,
     Scala,
+    /// Any other language: grammar from tree-sitter-language-pack, generic symbol rules.
+    Pack(String),
 }
 
 fn lang_of(path: &str, forced: Option<&str>) -> Option<Lang> {
@@ -63,12 +73,24 @@ fn lang_of(path: &str, forced: Option<&str>) -> Option<Lang> {
         "kt" | "kts" | "kotlin" => Some(Lang::Kotlin),
         "swift" => Some(Lang::Swift),
         "scala" | "sc" => Some(Lang::Scala),
-        _ => None,
+        _ => {
+            if let Some(f) = forced {
+                return Some(Lang::Pack(f.to_string()));
+            }
+            tree_sitter_language_pack::detect_language(path).map(|n| Lang::Pack(n.to_string()))
+        }
     }
 }
 
-fn grammar(l: &Lang) -> (Language, &'static str) {
-    match l {
+fn grammar(l: &Lang) -> Result<(Language, String), String> {
+    if let Lang::Pack(name) = l {
+        return match tree_sitter_language_pack::get_language(name) {
+            Ok(lang) => Ok((lang, name.clone())),
+            Err(e) => Err(format!("{name}: {e}")),
+        };
+    }
+    let (lang, name): (Language, &'static str) = match l {
+        Lang::Pack(_) => unreachable!(),
         Lang::Rust => (tree_sitter_rust::LANGUAGE.into(), "rust"),
         Lang::Go => (tree_sitter_go::LANGUAGE.into(), "go"),
         Lang::Ts => (tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), "typescript"),
@@ -85,7 +107,16 @@ fn grammar(l: &Lang) -> (Language, &'static str) {
         Lang::Kotlin => (tree_sitter_kotlin_ng::LANGUAGE.into(), "kotlin"),
         Lang::Swift => (tree_sitter_swift::LANGUAGE.into(), "swift"),
         Lang::Scala => (tree_sitter_scala::LANGUAGE.into(), "scala"),
-    }
+    };
+    Ok((lang, name.to_string()))
+}
+
+fn text<'a>(n: Node, src: &'a [u8]) -> &'a str {
+    n.utf8_text(src).unwrap_or("")
+}
+
+fn field(n: Node, name: &str, src: &[u8]) -> String {
+    n.child_by_field_name(name).map(|c| text(c, src).to_string()).unwrap_or_default()
 }
 
 /// The identifier at the bottom of a C / C++ declarator chain (`*foo(int)` → `foo`, `Foo::bar` kept).
@@ -98,7 +129,6 @@ fn declarator_name(n: Node, src: &[u8]) -> String {
             _ => match cur.child_by_field_name("declarator") {
                 Some(d) => cur = d,
                 None => {
-                    // reference_declarator etc. keep the inner declarator as an unnamed child
                     let mut c = cur.walk();
                     let inner = cur.children(&mut c).find(|ch| ch.kind().ends_with("declarator") || ch.kind() == "identifier");
                     match inner {
@@ -120,12 +150,95 @@ fn child_text(n: Node, kinds: &[&str], src: &[u8]) -> String {
         .unwrap_or_default()
 }
 
-fn text<'a>(n: Node, src: &'a [u8]) -> &'a str {
-    n.utf8_text(src).unwrap_or("")
+const GENERIC_KINDS: &[&str] = &[
+    "function", "method", "class", "struct", "enum", "interface", "trait", "impl", "module", "namespace",
+    "object", "protocol", "definition", "declaration", "typedef", "type_alias", "macro", "record", "union",
+    "constructor", "procedure", "subroutine", "rule", "task", "entity", "package", "fnproto", "vardecl",
+    "data_type", "newtype", "signature",
+];
+const GENERIC_NOT: &[&str] = &[
+    "call", "expression", "argument", "parameter", "reference", "access", "invocation", "import", "use_",
+    "type_arguments", "annotation", "attribute", "literal", "pattern", "field_", "variable_declaration",
+    "assignment", "local_", "constructors", "_body", "_list", "block",
+];
+const CONTAINER_KINDS: &[&str] = &["class", "struct", "impl", "trait", "interface", "module", "namespace", "object", "protocol", "record", "enum", "entity", "package", "vardecl"];
+const NAME_FIELDS: &[&str] = &["name", "function", "variable_type_function", "declarator", "pattern", "identifier"];
+
+fn generic_name(n: Node, src: &[u8]) -> String {
+    for f in NAME_FIELDS {
+        if let Some(c) = n.child_by_field_name(f) {
+            let t = match c.kind() {
+                k if k.ends_with("declarator") => declarator_name(c, src),
+                _ => text(c, src).to_string(),
+            };
+            if !t.is_empty() {
+                return t;
+            }
+        }
+    }
+    let mut c = n.walk();
+    n.named_children(&mut c)
+        .find(|ch| {
+            let k = ch.kind().to_ascii_lowercase();
+            !k.starts_with("type_") && (k.ends_with("identifier") || k == "name" || k.ends_with("_name") || k == "variable" || k == "alias")
+        })
+        .map(|ch| text(ch, src).to_string())
+        .unwrap_or_default()
 }
 
-fn field(n: Node, name: &str, src: &[u8]) -> String {
-    n.child_by_field_name(name).map(|c| text(c, src).to_string()).unwrap_or_default()
+/// Language-agnostic rule for grammars we have no table for, plus a few one-line specials
+/// for grammars that model declarations as calls or bindings.
+fn classify_generic(lang: &str, n: Node, src: &[u8]) -> Option<(&'static str, String, bool)> {
+    let k = n.kind().to_ascii_lowercase();
+    // Elixir: `def name(...)`, `defmodule Name do` are `call` nodes whose target is the macro.
+    if lang == "elixir" && k == "call" {
+        let target = field(n, "target", src);
+        let label: &'static str = match target.as_str() {
+            "defmodule" => "module",
+            "def" | "defp" | "defmacro" | "defmacrop" | "defguard" | "defguardp" => "def",
+            "defprotocol" => "protocol",
+            "defimpl" => "impl",
+            "defstruct" => "struct",
+            _ => return None,
+        };
+        let mut c = n.walk();
+        let args = n.named_children(&mut c).find(|ch| ch.kind() == "arguments")?;
+        let first = args.named_child(0)?;
+        let name = if label == "struct" { "struct".to_string() } else { text(first, src).split('(').next().unwrap_or("").trim().to_string() };
+        if name.is_empty() {
+            return None;
+        }
+        return Some((label, name, matches!(label, "module" | "protocol" | "impl")));
+    }
+    // OCaml / Haskell style: the definition node wraps a binding that carries the name.
+    if k == "value_definition" || k == "type_definition" || k == "module_definition" {
+        let mut c = n.walk();
+        if let Some(b) = n.named_children(&mut c).find(|ch| ch.kind().ends_with("_binding")) {
+            let name = generic_name(b, src);
+            if !name.is_empty() {
+                let label: &'static str = match k.as_str() { "value_definition" => "let", "type_definition" => "type", _ => "module" };
+                return Some((label, name, label == "module"));
+            }
+        }
+    }
+    if k.ends_with("_binding") || !GENERIC_KINDS.iter().any(|g| k.contains(g)) || GENERIC_NOT.iter().any(|g| k.contains(g)) {
+        return None;
+    }
+    let name = generic_name(n, src);
+    if name.is_empty() || name.len() > 120 || name.contains('\n') || name.contains(' ') {
+        return None;
+    }
+    let label: &'static str = match GENERIC_KINDS.iter().find(|g| k.contains(*g)).copied().unwrap_or("symbol") {
+        "fnproto" | "signature" => "function",
+        "vardecl" => {
+            let t = text(n, src);
+            if t.contains("struct {") || t.contains("struct(") { "struct" } else if t.contains("enum {") || t.contains("enum(") { "enum" } else if t.contains("union {") || t.contains("union(") { "union" } else { "const" }
+        }
+        "data_type" | "newtype" => "type",
+        other => other,
+    };
+    let container = CONTAINER_KINDS.iter().any(|g| k.contains(g));
+    Some((label, name, container))
 }
 
 /// Classify a node: Some((kind label, name, is_container)) when it is a symbol we report.
@@ -309,6 +422,7 @@ fn classify(l: &Lang, n: Node, src: &[u8]) -> Option<(&'static str, String, bool
             "val_definition" | "var_definition" => None,
             _ => None,
         },
+        Lang::Pack(name) => classify_generic(name, n, src),
     }
 }
 
@@ -323,7 +437,11 @@ fn walk(l: &Lang, n: Node, src: &[u8], prefix: &str, out: &mut Vec<Sym>) {
                 let full = if prefix.is_empty() { name.clone() } else { format!("{prefix}{}{name}", sep(l)) };
                 // A variable_declarator inside a lexical_declaration spans only the declarator;
                 // use the enclosing statement's range so the whole `const x = ...` is covered.
-                let range_node = if child.kind() == "variable_declarator" { child.parent().unwrap_or(child) } else { child };
+                let pk = child.parent().map(|p| p.kind().to_ascii_lowercase()).unwrap_or_default();
+                let wrapper = child.kind() == "variable_declarator"
+                    || (matches!(l, Lang::Pack(_)) && child.parent().map(|p| p.parent().is_some()).unwrap_or(false)
+                        && (pk == "decl" || pk.ends_with("_declaration") || pk.ends_with("_definition") || pk == "declaration"));
+                let range_node = if wrapper { child.parent().unwrap_or(child) } else { child };
                 out.push(Sym {
                     kind,
                     name: full.clone(),
@@ -342,6 +460,24 @@ fn walk(l: &Lang, n: Node, src: &[u8], prefix: &str, out: &mut Vec<Sym>) {
                 }
             }
         }
+    }
+}
+
+/// Debug aid for writing rules: named nodes with their field names, depth-limited.
+fn dump_tree(n: Node, src: &[u8], depth: usize) {
+    if depth > 4 {
+        return;
+    }
+    let mut c = n.walk();
+    for (idx, ch) in n.children(&mut c).enumerate() {
+        if !ch.is_named() {
+            continue;
+        }
+        let fname = n.field_name_for_child(idx as u32).unwrap_or("");
+        let t = text(ch, src);
+        let short: String = t.lines().next().unwrap_or("").chars().take(50).collect();
+        eprintln!("{}{}{}  L{}  {:?}", "  ".repeat(depth), if fname.is_empty() { String::new() } else { format!("{fname}: ") }, ch.kind(), ch.start_position().row + 1, short);
+        dump_tree(ch, src, depth + 1);
     }
 }
 
@@ -366,6 +502,7 @@ fn is_body(l: &Lang, kind: &str) -> bool {
         Lang::Bash => matches!(kind, "compound_statement"),
         Lang::Lua => matches!(kind, "block"),
         Lang::Kotlin | Lang::Swift | Lang::Scala => matches!(kind, "function_body" | "block" | "import_declaration" | "import_list"),
+        Lang::Pack(_) => matches!(kind, "block" | "compound_statement" | "statement_block" | "function_body"),
     }
 }
 
@@ -373,6 +510,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut forced: Option<String> = None;
     let mut path: Option<String> = None;
+    let mut dump = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -381,8 +519,34 @@ fn main() -> ExitCode {
                 i += 2;
             }
             "-h" | "--help" => {
-                eprintln!("usage: ctxgate-outline [--lang rust|go|ts|tsx|py|c|cpp|java|rb|cs|php|sh|lua|kt|swift|scala] <file | ->");
+                eprintln!("usage: ctxgate-outline [--lang L] <file | ->   |   --fetch L…   |   --languages");
                 return ExitCode::SUCCESS;
+            }
+            "--languages" => {
+                let mut names = tree_sitter_language_pack::manifest_languages().unwrap_or_else(|_| tree_sitter_language_pack::available_languages());
+                names.sort();
+                let cached = tree_sitter_language_pack::downloaded_languages().len();
+                println!("16 with dedicated rules: rust go typescript tsx python c cpp java ruby csharp php bash lua kotlin swift scala");
+                println!("{} via tree-sitter-language-pack ({} cached, the rest downloaded on first use):", names.len(), cached);
+                println!("{}", names.join(" "));
+                return ExitCode::SUCCESS;
+            }
+            "--dump" => {
+                dump = true;
+                i += 1;
+            }
+            "--fetch" => {
+                let names: Vec<&str> = args[i + 1..].iter().map(|s| s.as_str()).collect();
+                return match tree_sitter_language_pack::download(&names) {
+                    Ok(n) => {
+                        eprintln!("ctxgate-outline: {n} grammar(s) ready");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("ctxgate-outline: fetch failed: {e}");
+                        ExitCode::from(1)
+                    }
+                };
             }
             p => {
                 path = Some(p.to_string());
@@ -414,19 +578,37 @@ fn main() -> ExitCode {
 
     let mut symbols: Vec<Sym> = Vec::new();
     let lang_name = match lang_of(&path, forced.as_deref()) {
-        Some(l) => {
-            let (language, name) = grammar(&l);
-            let mut parser = Parser::new();
-            if parser.set_language(&language).is_ok() {
-                if let Some(tree) = parser.parse(&src, None) {
-                    walk(&l, tree.root_node(), &src, "", &mut symbols);
+        Some(l) => match grammar(&l) {
+            Ok((language, name)) => {
+                let mut parser = Parser::new();
+                if parser.set_language(&language).is_ok() {
+                    if let Some(tree) = parser.parse(&src, None) {
+                        if dump {
+                            dump_tree(tree.root_node(), &src, 0);
+                        }
+                        walk(&l, tree.root_node(), &src, "", &mut symbols);
+                    }
                 }
+                name
             }
-            name
-        }
-        None => "unknown",
+            Err(e) => {
+                eprintln!("ctxgate-outline: grammar unavailable ({e})");
+                "unknown".to_string()
+            }
+        },
+        None => "unknown".to_string(),
     };
 
+    // Grammars that split one thing over several nodes (a signature, then equations) produce
+    // adjacent symbols with the same name: fold them into one range.
+    let mut merged: Vec<Sym> = Vec::new();
+    for s in symbols {
+        match merged.last_mut() {
+            Some(prev) if prev.name == s.name && s.start <= prev.end + 1 => prev.end = prev.end.max(s.end),
+            _ => merged.push(s),
+        }
+    }
+    let symbols = merged;
     let syms: Vec<serde_json::Value> = symbols
         .iter()
         .map(|s| serde_json::json!({"kind": s.kind, "name": s.name, "start": s.start, "end": s.end}))
