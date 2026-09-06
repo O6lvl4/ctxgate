@@ -135,6 +135,11 @@ token counts are estimated as bytes / 4, the same approximation rtk uses.
 | **git** | `diff` / `show` / `log -p`: file table, squeezed hunks, lockfiles / generated / binaries as stats only. `status` and `log` in one line per item |
 | **Context Budgeter** | Usage from the transcript's last `assistant.usage`; window auto-detected (1M for `…[1m]` models, else 200k); NORMAL → COMPRESS 40% → AGGRESSIVE 60% → ISOLATE 75%; a one-line banner tells the model why outputs got shorter |
 | **Session dedup** | Identical output → one line. Changed → line diff (prefix/suffix strip + LCS) with one line of context. Forgets the session when Claude Code compacts |
+| **Grep / Glob** | Grep matches grouped per file with counts and a capped sample; Glob results as a per-directory tree with counts. The full list stays in the vault |
+| **Secrets** | Credential-shaped strings (cloud keys, GitHub / Anthropic / OpenAI / Slack / Stripe tokens, JWTs, bearer tokens, `PASSWORD=` style assignments, PEM private keys) are masked as `[REDACTED:kind]` before the vault, the dedup store and the model. The one thing ctxgate deliberately does not preserve |
+| **Retention** | `ctxgate gc` drops vault entries and session records older than 14 days (`CTXGATE_RETAIN_DAYS`); hooks run it at most once a day, so the vault stays bounded without attention |
+| **Compaction memory** | A `SessionStart` hook on `compact` / `resume` hands the model a digest of this session's vault entries, so ids survive the summary Claude Code writes |
+| **Status line** | `ctxgate statusline` reads Claude Code's status-line JSON, records the authoritative context percentage for the session (the Budgeter prefers it while fresh) and prints `ctxgate COMPRESS 48% · saved 299 KB` |
 | **rtk delegation** | With [rtk](https://github.com/rtk-ai/rtk) installed, Bash commands are rewritten through `rtk rewrite` first, honouring rtk's allow/ask/deny contract. rtk owns the command surface; ctxgate owns everything above it |
 | **Claude Code specifics** | Reads the file Claude Code persists for >30 KB outputs so failure detection covers the whole thing; knows the model only sees 2 KB of it and renders accordingly; annotates paged Reads with `lines A-B of N` |
 | **CLI** | `ctxgate summarize "<cmd>" < output` applies the same parsers outside the hook, for CI or a terminal |
@@ -171,7 +176,15 @@ ctxgate list [N]                   recent vault entries
 ctxgate stats                      bytes vaulted vs bytes shown, all time
 ctxgate status                     context usage and budget level of the current session
 ctxgate init [--global]            register the hooks
-ctxgate hook pre | post            the hook entry points (JSON on stdin)
+ctxgate gc [--days N] [--dry-run]  drop vault entries older than N days
+ctxgate statusline                 status-line segment (pipe Claude Code's status JSON in)
+ctxgate hook pre | post | session  the hook entry points (JSON on stdin)
+```
+
+To show the segment in your status line, add to the script Claude Code runs:
+
+```bash
+seg=$(printf '%s' "$input" | ctxgate statusline 2>/dev/null) && [[ -n "$seg" ]] && segments+=("$seg")
 ```
 
 ## Configuration
@@ -193,6 +206,8 @@ Environment variables; there is no config file.
 | `CTXGATE_DEDUP_MIN` | 600 | outputs at least this big take part in dedup (0 disables) |
 | `CTXGATE_DIFF_MAX_CELLS` | 4,000,000 | LCS budget for re-read diffs |
 | `CTXGATE_RTK` / `CTXGATE_RTK_BIN` | 1 / `rtk` | rtk delegation on/off, binary |
+| `CTXGATE_REDACT` | 1 | mask credential-shaped strings (0 disables) |
+| `CTXGATE_RETAIN_DAYS` | 14 | vault retention for `gc` and the daily auto-gc (0 keeps forever) |
 | `CTXGATE_DEBUG` | | `1` dumps raw hook input under `<home>/debug/` |
 
 ## How it compares

@@ -1,0 +1,132 @@
+// bench — the same tasks with and without ctxgate, measured on real `claude -p` runs.
+//
+//   almide run bench/bench.almd -- --repo <dir> [--runs 2] [--tasks bench/tasks.json] [--only name]
+//
+// For each task and each mode it runs `claude -p` in a fresh copy of <repo> (mode "on" gets a
+// .claude/settings.json from `ctxgate init`, mode "off" gets none) and reads the JSON result:
+// usage (input + cache read + cache creation = what the model actually processed), cost,
+// turns, wall time, and whether the answer matches the task's `check` regex. Prints a table
+// and writes bench/results-<ts>.json. Real tokens, not byte estimates.
+import env
+import fs
+import json
+import value
+import process
+import regex
+
+type Task = { name: String, prompt: String, check: String }
+type Run = { task: String, mode: String, run: Int, ok: Bool, in_tokens: Int, out_tokens: Int, cost_usd: Float, turns: Int, ms: Int, answer: String }
+
+fn arg(args: List[String], flag: String, default: String) -> String = match list.enumerate(args) |> list.find((p) => p.1 == flag) {
+  some((i, _)) => list.get(args, i + 1) ?? default,
+  none => default,
+}
+
+effect fn load_tasks(path: String) -> List[Task] = {
+  let j = json.parse(fs.read_text(path)!)!
+  (json.get_array(j, "tasks") ?? []) |> list.map((t) => Task {
+    name: json.get_string(t, "name") ?? "?",
+    prompt: json.get_string(t, "prompt") ?? "",
+    check: json.get_string(t, "check") ?? ".",
+  })
+}
+
+// A fresh working copy per run so nothing leaks between modes (vault state, seen store…).
+effect fn prepare(repo: String, mode: String, tag: String) -> String = {
+  let dir = "${env.temp_dir()}/ctxgate-bench/${tag}"
+  fs.mkdir_p("${env.temp_dir()}/ctxgate-bench")!
+  if fs.exists(dir) then fs.remove_all(dir)! else ()
+  process.exec_status("cp", ["-R", repo, dir])!
+  if fs.exists("${dir}/.claude/settings.json") then fs.remove("${dir}/.claude/settings.json")! else ()
+  if mode == "on" then { process.exec_status_timeout("ctxgate", ["init"], 10000) |> result.map_err((e) => "ctxgate init: ${e}")!; () } else ()
+  // every run gets its own vault too, so "on" cannot benefit from a warm cache
+  dir
+}
+
+effect fn run_one(task: Task, mode: String, n: Int, dir: String, max_turns: String, model: String) -> Run = {
+  let home = "${dir}/.ctxgate-home"
+  env.set("CTXGATE_HOME", home)
+  let t0 = env.millis()
+  let prompt_file = "${dir}/.bench-prompt.txt"
+  fs.write(prompt_file, task.prompt)!
+  // run inside the copy (claude has no --cwd); the prompt goes through a file to dodge quoting
+  let script = "cd \"$1\" && claude -p \"$(cat \"$2\")\" --output-format json --max-turns \"$3\" --permission-mode bypassPermissions --model \"$4\" --allowedTools Read Grep Glob Bash"
+  let st = process.exec_status_timeout("sh", ["-c", script, "bench", dir, prompt_file, max_turns, model], 900_000)
+    |> result.map_err((e) => "claude: ${e}")!
+  let ms = env.millis() - t0
+  let j = json.parse(st.stdout) ?? value.object([])
+  let usage = value.field(j, "usage") ?? value.object([])
+  let in_tokens = (json.get_int(usage, "input_tokens") ?? 0) + (json.get_int(usage, "cache_read_input_tokens") ?? 0) + (json.get_int(usage, "cache_creation_input_tokens") ?? 0)
+  let answer = json.get_string(j, "result") ?? string.take(st.stdout, 400)
+  Run {
+    task: task.name, mode: mode, run: n,
+    ok: st.code == 0 and regex.is_match(task.check, answer),
+    in_tokens: in_tokens,
+    out_tokens: json.get_int(usage, "output_tokens") ?? 0,
+    cost_usd: json.get_float(j, "total_cost_usd") ?? 0.0,
+    turns: json.get_int(j, "num_turns") ?? 0,
+    ms: ms,
+    answer: string.take(answer, 300),
+  }
+}
+
+fn run_to_value(r: Run) -> Value = value.object([
+  ("task", value.str(r.task)), ("mode", value.str(r.mode)), ("run", value.int(r.run)), ("ok", value.bool(r.ok)),
+  ("in_tokens", value.int(r.in_tokens)), ("out_tokens", value.int(r.out_tokens)), ("cost_usd", value.float(r.cost_usd)),
+  ("turns", value.int(r.turns)), ("ms", value.int(r.ms)), ("answer", value.str(r.answer)),
+])
+
+fn mean(xs: List[Int]) -> Int = if list.is_empty(xs) then 0 else list.sum(xs) / list.len(xs)
+
+fn pad(s: String, w: Int) -> String = if string.len(s) >= w then s else s + string.repeat(" ", w - string.len(s))
+
+fn report(runs: List[Run], tasks: List[Task]) -> List[String] = {
+  var out: List[String] = []
+  list.push(out, pad("task", 22) + pad("mode", 5) + pad("ok", 6) + pad("in_tokens", 11) + pad("out", 7) + pad("turns", 7) + pad("sec", 6) + "usd")
+  for t in tasks {
+    for mode in ["off", "on"] {
+      let rs = list.filter(runs, (r) => r.task == t.name and r.mode == mode)
+      if list.is_empty(rs) then () else {
+        let oks = list.count(rs, (r) => r.ok)
+        let cost = list.fold(rs, 0.0, (a, r) => a + r.cost_usd) / float.from_int(list.len(rs))
+        list.push(out, pad(t.name, 22) + pad(mode, 5) + pad("${int.to_string(oks)}/${int.to_string(list.len(rs))}", 6)
+          + pad(int.to_string(mean(list.map(rs, (r) => r.in_tokens))), 11) + pad(int.to_string(mean(list.map(rs, (r) => r.out_tokens))), 7)
+          + pad(int.to_string(mean(list.map(rs, (r) => r.turns))), 7) + pad(int.to_string(mean(list.map(rs, (r) => r.ms)) / 1000), 6)
+          + float.to_string(cost))
+      }
+    }
+  }
+  let off = list.filter(runs, (r) => r.mode == "off")
+  let on = list.filter(runs, (r) => r.mode == "on")
+  let tin_off = mean(list.map(off, (r) => r.in_tokens))
+  let tin_on = mean(list.map(on, (r) => r.in_tokens))
+  if tin_off > 0 and tin_on > 0 then list.push(out, "input tokens per run: off ${int.to_string(tin_off)} → on ${int.to_string(tin_on)}  (${int.to_string((tin_off - tin_on) * 100 / tin_off)}% less); success off ${int.to_string(list.count(off, (r) => r.ok))}/${int.to_string(list.len(off))}, on ${int.to_string(list.count(on, (r) => r.ok))}/${int.to_string(list.len(on))}") else ()
+  out
+}
+
+effect fn main() -> Unit = {
+  let args = env.args()
+  let repo = arg(args, "--repo", "")
+  guard repo != "" else err("usage: almide run bench/bench.almd -- --repo <dir> [--runs N] [--tasks file] [--only name] [--max-turns N] [--model m]")
+  let runs_n = int.parse(arg(args, "--runs", "2")) ?? 2
+  let only = arg(args, "--only", "")
+  let max_turns = arg(args, "--max-turns", "25")
+  let model = arg(args, "--model", "sonnet")
+  let tasks = load_tasks(arg(args, "--tasks", "bench/tasks.json"))! |> list.filter((t) => only == "" or t.name == only)
+  var runs: List[Run] = []
+  for t in tasks {
+    for mode in ["off", "on"] {
+      for n in 1...runs_n {
+        let dir = prepare(repo, mode, "${t.name}-${mode}-${int.to_string(n)}")!
+        let r = run_one(t, mode, n, dir, max_turns, model)!
+        list.push(runs, r)
+        println("${t.name} ${mode} #${int.to_string(n)}: ${if r.ok then "ok" else "FAIL"} in=${int.to_string(r.in_tokens)} turns=${int.to_string(r.turns)} ${int.to_string(r.ms / 1000)}s")
+      }
+    }
+  }
+  println("")
+  for l in report(runs, tasks) { println(l) }
+  let out = "bench/results-${int.to_string(env.unix_timestamp())}.json"
+  fs.write(out, json.stringify_pretty(value.array(list.map(runs, run_to_value))))!
+  println("\nwritten ${out}")
+}

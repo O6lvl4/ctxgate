@@ -24,6 +24,8 @@ type Config = {
   dedup_min: Int,        // outputs at least this big take part in session dedup (0 disables)
   diff_max_cells: Int,   // LCS budget for "changed since last seen" diffs
   rtk_bin: String,       // rtk binary for Bash rewrites ("" = off; CTXGATE_RTK=0 or CTXGATE_RTK_BIN)
+  redact: Bool,          // mask credential-shaped strings before vault/model (CTXGATE_REDACT=0 disables)
+  retain_days: Int,      // vault entries older than this are removed by gc (CTXGATE_RETAIN_DAYS; 0 = keep forever)
   debug: Bool,           // CTXGATE_DEBUG=1 dumps raw hook stdin under <home>/debug
 }
 
@@ -65,6 +67,8 @@ effect fn load() -> Config = {
     dedup_min: env_int("CTXGATE_DEDUP_MIN", 600)!,
     diff_max_cells: env_int("CTXGATE_DIFF_MAX_CELLS", 4_000_000)!,
     rtk_bin: if (env.get("CTXGATE_RTK") ?? "1") == "0" then "" else env.get("CTXGATE_RTK_BIN") ?? "rtk",
+    redact: (env.get("CTXGATE_REDACT") ?? "1") != "0",
+    retain_days: env_int("CTXGATE_RETAIN_DAYS", 14)!,
     debug: (env.get("CTXGATE_DEBUG") ?? "") == "1",
   }
 }

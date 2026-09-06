@@ -1,0 +1,131 @@
+// e2e — the hooks end to end, on real Claude Code payloads.
+//
+// tests/hooks/*.json are PostToolUse inputs captured from live sessions (paths neutralised)
+// plus two synthetic ones shaped after cli.js (Grep content mode, Glob). Each test pipes the
+// payload through hook_post.run exactly as the hook would, into a throwaway vault, and checks
+// the JSON envelope Claude Code would receive. No network, no rtk, no outline helper.
+import fs
+import json
+import value
+import env
+import self.config
+import self.hook_post
+
+fn cfg_in(home: String) -> config.Config = config.Config {
+  home: home, max_bash: 8000, max_read: 12000, max_grep: 8000, max_other: 10000,
+  head: 30, tail: 30, salient: 40, line_clip: 200, grep_head_limit: 60,
+  outline_bin: "/nonexistent/ctxgate-outline", outline_max: 120, max_block: 20,
+  window: 200000, lvl_compress: 40, lvl_aggressive: 60, lvl_isolate: 75,
+  dedup_min: 600, diff_max_cells: 4_000_000, rtk_bin: "", redact: true, retain_days: 14, debug: false,
+}
+
+effect fn fresh_home(tag: String) -> String = {
+  let dir = "${env.temp_dir()}/ctxgate-e2e-${tag}-${int.to_string(env.millis())}"
+  fs.mkdir_p(dir)!
+  dir
+}
+
+effect fn run_post(tag: String, fixture: String) -> (config.Config, String, Option[String]) = {
+  let cfg = cfg_in(fresh_home(tag)!)
+  let raw = fs.read_text("tests/hooks/${fixture}.json")!
+  (cfg, raw, hook_post.run(cfg, raw, "")!)
+}
+
+// The text Claude Code would show, pulled from the envelope the same way it would.
+fn shown(out: Option[String], path: List[String]) -> String = match out {
+  none => "",
+  some(s) => match json.parse(s) {
+    err(_) => "",
+    ok(j) => {
+      let p = list.fold(path, json.field(json.root(), "hookSpecificOutput"), (acc, k) => json.field(acc, k))
+      match json.get_path(j, p) {
+        some(v) => match value.as_string(v) {
+          ok(t) => t,
+          err(_) => (value.as_array(v) ?? []) |> list.filter_map((x) => value.as_string(x)?) |> list.join("\n"),
+        },
+        none => "",
+      }
+    },
+  }
+}
+
+test "small bash output passes through untouched" {
+  let (_, _, out) = run_post("small", "bash_small")!
+  assert(option.is_none(out))
+}
+
+test "persisted bash: full file missing → prefix summarised, envelope shape intact" {
+  let (_, raw, out) = run_post("persisted", "bash_persisted")!
+  assert(option.is_some(out))
+  let stdout = shown(out, ["updatedToolOutput", "stdout"])
+  assert(string.contains(stdout, "[ctxgate] Bash output:"))
+  assert(string.contains(stdout, "vaulted as ctx:"))
+  assert(string.len(stdout) < 2000)   // Claude Code shows only the first 2 KB of a persisted output
+  // sibling fields survive
+  let j = json.parse(out ?? "")!
+  let upd = json.get_path(j, json.field(json.field(json.root(), "hookSpecificOutput"), "updatedToolOutput")) ?? value.null()
+  assert_eq(json.get_bool(upd, "interrupted"), some(false))
+  assert(option.is_some(json.get_string(upd, "persistedOutputPath")))
+  assert(string.contains(raw, "\"tool_use_id\""))
+}
+
+test "read of a large file: no outline helper → head/tail with page info" {
+  let (_, _, out) = run_post("read", "read_rust")!
+  let content = shown(out, ["updatedToolOutput", "file", "content"])
+  assert(string.contains(content, "[ctxgate] Read output:"))
+  assert(string.contains(content, "lines 1-1643 of 4191"))
+  assert(string.contains(content, "lines omitted"))
+  assert(string.len(content) < 4000)
+}
+
+test "grep content mode → per-file groups in the content field" {
+  let (_, _, out) = run_post("grep", "grep_content")!
+  let content = shown(out, ["updatedToolOutput", "content"])
+  assert(string.contains(content, "grep: 320 matches in 2 files"))
+  assert(string.contains(content, "── src/a.rs (200) ──"))
+  assert(string.contains(content, "more in this file"))
+  assert(string.len(content) < 3000)
+}
+
+test "glob with many files → directory tree in filenames" {
+  let (_, _, out) = run_post("glob", "glob_many")!
+  let names = shown(out, ["updatedToolOutput", "filenames"])
+  assert(string.contains(names, "glob: 530 files in 26 directories"))
+  assert(string.contains(names, "src/ (30):"))
+  assert(string.contains(names, "more directories") or string.contains(names, "node_modules/pkg0/lib/ (20)"))
+  assert(string.len(names) < 4000)
+}
+
+test "second identical payload → dedup one-liner" {
+  let cfg = cfg_in(fresh_home("dedup")!)
+  let raw = fs.read_text("tests/hooks/read_rust.json")!
+  let first = hook_post.run(cfg, raw, "")!
+  assert(option.is_some(first))
+  let second = hook_post.run(cfg, raw, "")!
+  let content = shown(second, ["updatedToolOutput", "file", "content"])
+  assert(string.contains(content, "unchanged since you last saw it"))
+  assert(string.len(content) < 400)
+}
+
+test "a small output with a secret is still replaced, masked" {
+  let cfg = cfg_in(fresh_home("secret")!)
+  let raw = "{\"session_id\":\"e2e\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"cat .env\"},\"tool_response\":{\"stdout\":\"PORT=3000\\nAWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\\nDB_PASSWORD=correct-horse-battery\\n\",\"stderr\":\"\"}}"
+  let out = hook_post.run(cfg, raw, "")!
+  let stdout = shown(out, ["updatedToolOutput", "stdout"])
+  assert(string.contains(stdout, "credential-shaped value(s) masked"))
+  assert(string.contains(stdout, "PORT=3000"))
+  assert(string.contains(stdout, "[REDACTED:aws-access-key]"))
+  assert(not string.contains(stdout, "AKIAIOSFODNN7EXAMPLE"))
+  assert(not string.contains(stdout, "correct-horse-battery"))
+  // and the vault copy is masked too
+  let store = fs.list_dir("${cfg.home}/store")!
+  assert_eq(list.len(store), 1)
+  let kept = fs.read_text("${cfg.home}/store/${list.get(store, 0) ?? ""}")!
+  assert(not string.contains(kept, "AKIAIOSFODNN7EXAMPLE"))
+}
+
+test "malformed input → nothing emitted" {
+  let cfg = cfg_in(fresh_home("bad")!)
+  assert(option.is_none(hook_post.run(cfg, "not json at all", "")!))
+  assert(option.is_none(hook_post.run(cfg, "{\"tool_name\":\"Bash\"}", "")!))
+}

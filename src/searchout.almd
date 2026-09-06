@@ -1,0 +1,140 @@
+// searchout — Grep and Glob results, grouped instead of listed.
+//
+// Grep (content mode) prints `path:line:text` per match; 300 matches in 12 files is 300 lines
+// where the model wanted "which files, roughly where". Glob prints one path per line; 800 files
+// under node_modules-ish trees is noise. Both become a per-file / per-directory table with
+// counts and a capped sample, and the full text stays in the vault.
+//
+// Claude Code shapes (from cli.js 2.1.x):
+//   Grep  {mode, numFiles, filenames, content, numLines|numMatches, appliedLimit, appliedOffset}
+//         the model sees `content`: "path:LINE:text" (matches) / "path-LINE-text" (context lines)
+//   Glob  {durationMs, numFiles, filenames, truncated}  → the model sees filenames joined by "\n"
+import regex
+import self.compress
+
+type Hit = { path: String, line: Int, text: String, is_match: Bool }
+
+// "a/b.rs:12:let x" → Hit; "a/b.rs-10-context" → context Hit; anything else → none.
+fn parse_hit(l: String) -> Option[Hit] = match regex.captures("^([^:]+):([0-9]+):(.*)$", l) {
+  some(c) => some(Hit { path: list.get(c, 1) ?? "", line: int.parse(list.get(c, 2) ?? "") ?? 0, text: list.get(c, 3) ?? "", is_match: true }),
+  none => match regex.captures("^([^-]+)-([0-9]+)-(.*)$", l) {
+    some(c) => some(Hit { path: list.get(c, 1) ?? "", line: int.parse(list.get(c, 2) ?? "") ?? 0, text: list.get(c, 3) ?? "", is_match: false }),
+    none => none,
+  },
+}
+
+type FileHits = { path: String, hits: List[Hit] }
+
+fn group_by_path(hits: List[Hit]) -> List[FileHits] = {
+  var out: List[FileHits] = []
+  var cur_path = ""
+  var cur: List[Hit] = []
+  for h in hits {
+    if h.path != cur_path then {
+      if cur_path != "" then list.push(out, FileHits { path: cur_path, hits: cur }) else ()
+      cur_path = h.path
+      cur = [h]
+    } else list.push(cur, h)
+  }
+  if cur_path != "" then list.push(out, FileHits { path: cur_path, hits: cur }) else ()
+  out
+}
+
+// Grep content → per-file groups. none when the text is not ripgrep-shaped.
+fn grep_content(text: String, max_files: Int, per_file: Int, clip: Int) -> Option[String] = {
+  let lines = string.lines(text) |> list.filter((l) => l != "" and l != "--")
+  let hits = list.filter_map(lines, parse_hit)
+  guard list.len(hits) * 10 >= list.len(lines) * 8 and not list.is_empty(hits) else none
+  let groups = group_by_path(hits)
+  let matches = list.count(hits, (h) => h.is_match)
+  var out: List[String] = []
+  list.push(out, "grep: ${int.to_string(matches)} matches in ${int.to_string(list.len(groups))} files")
+  for g in list.take(groups, max_files) {
+    let n = list.count(g.hits, (h) => h.is_match)
+    list.push(out, "── ${g.path} (${int.to_string(n)}) ──")
+    let shown = list.filter(g.hits, (h) => h.is_match) |> list.take(per_file)
+    for h in shown { list.push(out, "  L${int.to_string(h.line)}: ${compress.clip(string.trim(h.text), clip)}") }
+    if n > per_file then list.push(out, "  … ${int.to_string(n - per_file)} more in this file") else ()
+  }
+  if list.len(groups) > max_files then {
+    let rest = list.drop(groups, max_files)
+    list.push(out, "── ${int.to_string(list.len(rest))} more files ──")
+    let names = list.map(rest, (g) => g.path + " (" + int.to_string(list.count(g.hits, (h) => h.is_match)) + ")")
+    list.push(out, "  " + list.join(list.take(names, 40), ", "))
+  } else ()
+  some(list.join(out, "\n"))
+}
+
+// ── Glob ──────────────────────────────────────────────────────────────────
+type Dir = { dir: String, files: List[String] }
+
+fn dir_of(p: String) -> String = {
+  let parts = string.split(p, "/")
+  if list.len(parts) <= 1 then "." else list.join(list.take(parts, list.len(parts) - 1), "/")
+}
+
+fn base_of(p: String) -> String = list.last(string.split(p, "/")) ?? p
+
+fn group_by_dir(paths: List[String]) -> List[Dir] = {
+  var out: List[Dir] = []
+  var cur_dir = "\u{0}"
+  var cur: List[String] = []
+  for p in list.sort(paths) {
+    let d = dir_of(p)
+    if d != cur_dir then {
+      if cur_dir != "\u{0}" then list.push(out, Dir { dir: cur_dir, files: cur }) else ()
+      cur_dir = d
+      cur = [base_of(p)]
+    } else list.push(cur, base_of(p))
+  }
+  if cur_dir != "\u{0}" then list.push(out, Dir { dir: cur_dir, files: cur }) else ()
+  out
+}
+
+// Glob filenames → one line per directory with a capped file sample. Returns the lines that
+// replace `filenames` (Claude Code joins them with "\n", so each is a display line).
+fn glob_tree(paths: List[String], max_dirs: Int, per_dir: Int) -> List[String] = {
+  let dirs = group_by_dir(paths)
+  var out: List[String] = []
+  list.push(out, "glob: ${int.to_string(list.len(paths))} files in ${int.to_string(list.len(dirs))} directories")
+  for d in list.take(dirs, max_dirs) {
+    let sample = list.take(d.files, per_dir) |> list.join(", ")
+    let more = if list.len(d.files) > per_dir then ", … ${int.to_string(list.len(d.files) - per_dir)} more" else ""
+    list.push(out, "  ${d.dir}/ (${int.to_string(list.len(d.files))}): ${sample}${more}")
+  }
+  if list.len(dirs) > max_dirs then list.push(out, "  … ${int.to_string(list.len(dirs) - max_dirs)} more directories") else ()
+  out
+}
+
+test "parse ripgrep lines" {
+  match parse_hit("src/a.rs:12:fn main() {") {
+    some(h) => { assert_eq(h.path, "src/a.rs"); assert_eq(h.line, 12); assert(h.is_match) },
+    none => assert(false),
+  }
+  match parse_hit("src/a.rs-11-// doc") {
+    some(h) => assert(not h.is_match),
+    none => assert(false),
+  }
+  assert(option.is_none(parse_hit("Found 3 files")))
+}
+
+test "grep groups by file and caps" {
+  let text = list.range(0, 30) |> list.map((i) => "src/${if i < 20 then "a" else "b"}.rs:${int.to_string(i + 1)}:fn f${int.to_string(i)}()") |> list.join("\n")
+  let s = grep_content(text, 10, 5, 100) ?? ""
+  assert(string.contains(s, "grep: 30 matches in 2 files"))
+  assert(string.contains(s, "── src/a.rs (20) ──"))
+  assert(string.contains(s, "  … 15 more in this file"))
+  assert(string.contains(s, "L21: fn f20()"))
+}
+
+test "grep refuses non-ripgrep text" {
+  assert(option.is_none(grep_content("hello\nworld", 10, 5, 100)))
+}
+
+test "glob tree groups by directory" {
+  let paths = ["src/a.rs", "src/b.rs", "src/c.rs", "tests/x.rs", "README.md"]
+  let t = glob_tree(paths, 10, 2)
+  assert_eq(list.get(t, 0), some("glob: 5 files in 3 directories"))
+  assert(list.any(t, (l) => string.contains(l, "src/ (3): a.rs, b.rs, … 1 more")))
+  assert(list.any(t, (l) => string.starts_with(l, "  ./ (1): README.md")))
+}

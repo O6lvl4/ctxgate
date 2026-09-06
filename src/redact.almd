@@ -1,0 +1,107 @@
+// redact — secrets never reach the vault or the model.
+//
+// ctxgate's promise is "nothing is lost", with one deliberate exception: credential-shaped
+// strings. `cat .env`, `env`, `aws configure list`, a stack trace with a bearer token — the
+// vault would otherwise keep them on disk indefinitely, and the compressed view would hand
+// them to the model. Both copies are masked; the mask says what kind of thing was there.
+// Pattern matching only (no entropy heuristics), so false positives are rare and legible.
+import regex
+
+type Rule = { kind: String, pattern: String }
+
+// (a fn, not a top-level `let`: iterating a top-level List[Record] hits almide/almide#1931)
+fn rules() -> List[Rule] = [
+  Rule { kind: "aws-access-key", pattern: "AKIA[0-9A-Z]{16}" },
+  Rule { kind: "github-token", pattern: "gh[pousr]_[A-Za-z0-9]{20,}" },
+  Rule { kind: "github-token", pattern: "github_pat_[A-Za-z0-9_]{20,}" },
+  Rule { kind: "anthropic-key", pattern: "sk-ant-[A-Za-z0-9_-]{20,}" },
+  Rule { kind: "openai-key", pattern: "sk-[A-Za-z0-9_-]{20,}" },
+  Rule { kind: "slack-token", pattern: "xox[baprs]-[A-Za-z0-9-]{10,}" },
+  Rule { kind: "google-key", pattern: "AIza[0-9A-Za-z_-]{35}" },
+  Rule { kind: "stripe-key", pattern: "[sr]k_(live|test)_[A-Za-z0-9]{16,}" },
+  Rule { kind: "jwt", pattern: "eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}" },
+  Rule { kind: "bearer", pattern: "[Bb]earer [A-Za-z0-9._~+/=-]{20,}" },
+  Rule { kind: "npm-token", pattern: "npm_[A-Za-z0-9]{30,}" },
+]
+
+// `NAME=value` / `NAME: value` / `"NAME": "value"` where NAME smells like a credential.
+let ASSIGN_KEYS = "(PASSWORD|PASSWD|SECRET|TOKEN|API_KEY|APIKEY|PRIVATE_KEY|ACCESS_KEY|AUTH|CREDENTIAL)"
+
+fn mask(kind: String) -> String = "[REDACTED:${kind}]"
+
+fn redact_line(line: String) -> (String, Int) = {
+  var l = line
+  var n = 0
+  for r in rules() {
+    if regex.is_match(r.pattern, l) then {
+      n = n + list.len(regex.find_all(r.pattern, l))
+      l = regex.replace(r.pattern, l, mask(r.kind))
+    } else ()
+  }
+  // assignments: keep the key, mask the value (no backreferences in almide's regex.replace,
+  // so rebuild the line from the capture groups instead)
+  let assign = "([A-Za-z_]*" + ASSIGN_KEYS + "[A-Za-z_]*)(\\s*[=:]\\s*[\"']?)([^\"'\\s,;]{6,})"
+  var guard_n = 0
+  while guard_n < 4 and not string.contains(l, "[REDACTED:") and regex.is_match(assign, l) {
+    match regex.captures(assign, l) {
+      some(c) => {
+        let whole = list.get(c, 0) ?? ""
+        let rebuilt = (list.get(c, 1) ?? "") + (list.get(c, 3) ?? "") + mask("value")
+        l = string.replace(l, whole, rebuilt)
+        n = n + 1
+      },
+      none => (),
+    }
+    guard_n = guard_n + 1
+  }
+  (l, n)
+}
+
+// Whole text: per-line rules plus PEM private-key blocks (multi-line).
+fn redact(text: String) -> (String, Int) = {
+  var out: List[String] = []
+  var total = 0
+  var in_key = false
+  for line in string.lines(text) {
+    if string.contains(line, "-----BEGIN ") and string.contains(line, "PRIVATE KEY-----") then {
+      in_key = true
+      total = total + 1
+      list.push(out, mask("private-key"))
+    } else if in_key then {
+      if string.contains(line, "-----END ") then in_key = false else ()
+    } else {
+      let (l, n) = redact_line(line)
+      total = total + n
+      list.push(out, l)
+    }
+  }
+  (list.join(out, "\n"), total)
+}
+
+test "masks well-known token shapes" {
+  let (t, n) = redact("key=AKIAIOSFODNN7EXAMPLE and gh token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345")
+  assert_eq(n, 2)
+  assert(string.contains(t, "[REDACTED:aws-access-key]"))
+  assert(string.contains(t, "[REDACTED:github-token]"))
+  assert(not string.contains(t, "AKIAIOSFODNN7EXAMPLE"))
+}
+
+test "masks assignment values but keeps the key name" {
+  let (t, n) = redact("DATABASE_PASSWORD=hunter22hunter\nAPI_KEY: abcdefgh12345\nPORT=8080")
+  assert_eq(n, 2)
+  assert(string.contains(t, "DATABASE_PASSWORD="))
+  assert(not string.contains(t, "hunter22hunter"))
+  assert(string.contains(t, "PORT=8080"))
+}
+
+test "collapses private key blocks" {
+  let (t, n) = redact("before\n-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nAAAA\n-----END RSA PRIVATE KEY-----\nafter")
+  assert_eq(n, 1)
+  assert_eq(t, "before\n[REDACTED:private-key]\nafter")
+}
+
+test "leaves ordinary text alone" {
+  let (t, n) = redact("fn main() { let token = parse(input); }\nsk-1234 is too short")
+  assert_eq(n, 0)
+  assert(string.contains(t, "let token = parse(input)"))
+}

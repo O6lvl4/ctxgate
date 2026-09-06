@@ -1,0 +1,26 @@
+{
+  "repo": "https://github.com/rtk-ai/rtk",
+  "note": "Read-only exploration tasks on a large real codebase. `check` is a regex the final answer must match; the tasks are chosen so that the answer requires reading big files / running searches, which is where ctxgate acts.",
+  "tasks": [
+    {
+      "name": "hunk-header-parser",
+      "prompt": "In src/cmds/git/git.rs, which function parses `@@` hunk headers, and which function flushes the leading context lines kept before a change? Answer with the two function names only, comma separated.",
+      "check": "parse_hunk_header.*flush_leading_context|flush_leading_context.*parse_hunk_header"
+    },
+    {
+      "name": "rewrite-exit-codes",
+      "prompt": "What exit codes can `rtk rewrite` return and what does each mean? The Claude Code hook script under hooks/claude/ documents them. Answer as `code: meaning` lines.",
+      "check": "3.*(ask|prompt)"
+    },
+    {
+      "name": "tee-min-size",
+      "prompt": "In src/core/tee.rs, what is the minimum output size (in bytes) below which raw output is not tee'd to disk, and what is the default maximum number of tee files kept? Answer with the two numbers.",
+      "check": "[0-9]+"
+    },
+    {
+      "name": "cargo-test-filter",
+      "prompt": "Find the function in src/cmds/rust/ that filters `cargo test` output down to failures only, and say which struct or enum it returns or writes into. Answer with the function name and the type name.",
+      "check": "fn|[A-Z][A-Za-z]+"
+    }
+  ]
+}

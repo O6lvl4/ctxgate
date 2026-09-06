@@ -24,7 +24,7 @@ let USAGE = """
 ctxgate — agent context firewall for Claude Code
 
 usage:
-  ctxgate hook pre | post            hook handlers (read JSON on stdin)
+  ctxgate hook pre | post | session  hook handlers (read JSON on stdin)
   ctxgate show <id> [--grep RE] [--around RE [N]] [--lines A-B] [--head N] [--tail N] [--symbol NAME]
   ctxgate outline <file>             symbol table (kind, name, line range) of a source file
   ctxgate summarize "<command>"      stdin = that command's output → runner-aware summary (cargo/go/pytest/vitest/jest/tsc)
@@ -32,6 +32,7 @@ usage:
   ctxgate stats                      totals: raw bytes vaulted vs bytes shown
   ctxgate status                     context budget of the latest session (usage, level, thresholds)
   ctxgate init [--global]            add hooks to .claude/settings.json (or ~/.claude/settings.json)
+  ctxgate gc [--days N] [--dry-run]  drop vault entries older than N days (default CTXGATE_RETAIN_DAYS=14)
   ctxgate path <id>                  print the raw file path
 
 env: CTXGATE_HOME, CTXGATE_MAX_BASH/READ/GREP/OTHER, CTXGATE_HEAD, CTXGATE_TAIL,
@@ -49,9 +50,11 @@ effect fn main() -> Unit = {
     "path" => cmd_path(cfg, list.get(args, 1) ?? ""),
     "list" => cmd_list(cfg, list.get(args, 1) ?? "20"),
     "stats" => cmd_stats(cfg),
-    "status" => cmd_status(cfg),
+    "status" => if list.contains(args, "--line") then cmd_status_line(cfg, "") else cmd_status(cfg),
+    "statusline" => cmd_statusline(cfg),
     "init" => cmd_init(cfg, list.contains(args, "--global")),
-    "version" | "--version" | "-V" => println("ctxgate 0.7.0"),
+    "gc" => cmd_gc(cfg, list.drop(args, 1), true),
+    "version" | "--version" | "-V" => println("ctxgate 0.8.0"),
     _ => println(USAGE),
   }
 }
@@ -67,9 +70,11 @@ effect fn cmd_hook(base: config.Config, which: String) -> Unit = {
     some(u) => budget.banner(u) ?? "",
     none => "",
   }
+  auto_gc(base) ?? ()
   let out = match which {
     "pre" => hook_pre.run(cfg, raw) ?? none,
     "post" => hook_post.run(cfg, raw, banner) ?? none,
+    "session" => session_digest(cfg, raw) ?? none,
     _ => none,
   }
   match out {
@@ -229,7 +234,8 @@ fn merge_settings(settings: Value) -> Value = {
   }
   let h1 = set(hooks, "PreToolUse", hook_entry("Bash|Grep", "pre"))
   let h2 = set(h1, "PostToolUse", hook_entry("Bash|Read|Grep|Glob|WebFetch|mcp__.*", "post"))
-  value.merge(settings, value.object([("hooks", h2)]))
+  let h3 = set(h2, "SessionStart", hook_entry("compact|resume", "session"))
+  value.merge(settings, value.object([("hooks", h3)]))
 }
 
 effect fn cmd_init(cfg: config.Config, global: Bool) -> Unit = {
@@ -307,4 +313,124 @@ effect fn cmd_status(cfg: config.Config) -> Unit = {
       println("  this session: ${int.to_string(list.len(es))} outputs vaulted, ${compress.human_bytes(raw - kept)} kept out of context (≈${int.to_string((raw - kept) / 4)} tokens)")
     },
   }
+}
+
+// ── statusline ────────────────────────────────────────────────────────────
+// `ctxgate statusline` reads Claude Code's status-line JSON on stdin, records the authoritative
+// context_window.used_percentage for the session (the Budgeter prefers it over its own estimate
+// while fresh), and prints one segment: "ctxgate COMPRESS 42% · saved 195KB".
+effect fn cmd_statusline(cfg: config.Config) -> Unit = {
+  let raw = io.read_all()
+  match json.parse(raw) {
+    err(_) => cmd_status_line(cfg, ""),
+    ok(j) => {
+      let sid = json.get_string(j, "session_id") ?? ""
+      let pct = match value.field(j, "context_window")? {
+        some(cw) => match json.get_float(cw, "used_percentage") {
+          some(f) => some(float.to_int(f)),
+          none => json.get_int(cw, "used_percentage"),
+        },
+        none => none,
+      }
+      match pct {
+        some(p) => budget.record_reported(cfg, sid, p) ?? (),
+        none => (),
+      }
+      cmd_status_line(cfg, sid)
+    },
+  }
+}
+
+// One line for a prompt or status bar. `sid` empty → latest session.
+effect fn cmd_status_line(cfg: config.Config, sid_hint: String) -> Unit = {
+  let s = match budget.latest_session(cfg) ?? none {
+    some(v) => v,
+    none => value.object([]),
+  }
+  let sid = if sid_hint != "" then sid_hint else json.get_string(s, "session") ?? ""
+  let pct = match budget.reported_pct(cfg, sid) ?? none {
+    some(p) => p,
+    none => json.get_int(s, "pct") ?? 0,
+  }
+  let level = budget.level_name(budget.level_of(cfg, pct))
+  let es = vault.entries(cfg)! |> list.filter((e) => e.session == sid)
+  let saved = list.sum(list.map(es, (e) => e.bytes - e.kept))
+  println("ctxgate ${level} ${int.to_string(pct)}% · saved ${compress.human_bytes(int.max(0, saved))}")
+}
+
+// ── SessionStart (compact / resume) ───────────────────────────────────────
+// After a compaction the model has forgotten which outputs are in the vault. SessionStart
+// hooks may print plain text that is added to the context, so we hand back a digest of this
+// session's vault entries: enough to know what exists and how to fetch it, nothing more.
+effect fn session_digest(cfg: config.Config, raw: String) -> Option[String] = {
+  let j = json.parse(raw) ?? value.object([])
+  let sid = json.get_string(j, "session_id") ?? ""
+  let source = json.get_string(j, "source") ?? ""
+  guard sid != "" and (source == "compact" or source == "resume") else none
+  let es = vault.entries(cfg)! |> list.filter((e) => e.session == sid)
+  guard not list.is_empty(es) else none
+  // newest first, one line per distinct id
+  var seen_ids: List[String] = []
+  var recent: List[vault.Entry] = []
+  for e in list.reverse(es) {
+    if list.contains(seen_ids, e.id) or list.len(recent) >= 20 then () else { list.push(seen_ids, e.id); list.push(recent, e) }
+  }
+  var out: List[String] = []
+  list.push(out, "[ctxgate] ${int.to_string(list.len(es))} tool outputs from this session are in the vault (raw text preserved). Retrieve any of them with `ctxgate show <id> [--symbol NAME | --grep RE | --around RE N | --lines A-B]`; `ctxgate status` shows the context budget.")
+  for e in recent {
+    list.push(out, "  ${e.id}  ${e.tool}  ${compress.human_bytes(e.bytes)}  ${compress.clip(e.label, 100)}")
+  }
+  some(list.join(out, "\n"))
+}
+
+// ── gc (retention) ────────────────────────────────────────────────────────
+// The vault is append-only; without a ceiling it grows forever and keeps every output a
+// user ever saw. `gc` removes store files and session records older than `days`, then rewrites
+// index.jsonl without the dropped ids. Hooks run it opportunistically once a day.
+effect fn cmd_gc(cfg: config.Config, args: List[String], verbose: Bool) -> Unit = {
+  let days = match list.enumerate(args) |> list.find((p) => p.1 == "--days") {
+    some((i, _)) => int.parse(list.get(args, i + 1) ?? "") ?? cfg.retain_days,
+    none => cfg.retain_days,
+  }
+  let dry = list.contains(args, "--dry-run")
+  guard days > 0 else { if verbose then println("gc: retention disabled (days = 0)") else () }
+  let cutoff = env.unix_timestamp() - days * 86400
+  var dropped: List[String] = []
+  var freed = 0
+  let store = vault.store_dir(cfg)
+  for n in (fs.list_dir(store) ?? []) {
+    let p = "${store}/${n}"
+    let old = (fs.modified_at(p) ?? cutoff + 1) < cutoff
+    if old and string.ends_with(n, ".txt") then {
+      freed = freed + (fs.file_size(p) ?? 0)
+      list.push(dropped, string.slice(n, 0, string.len(n) - 4))
+      if dry then () else fs.remove(p) ?? ()
+    } else ()
+  }
+  let sessions = "${cfg.home}/sessions"
+  var dropped_sessions = 0
+  for n in (fs.list_dir(sessions) ?? []) {
+    let p = "${sessions}/${n}"
+    if (fs.modified_at(p) ?? cutoff + 1) < cutoff then {
+      dropped_sessions = dropped_sessions + 1
+      if dry then () else fs.remove(p) ?? ()
+    } else ()
+  }
+  if not dry and not list.is_empty(dropped) then {
+    let kept = vault.entries(cfg)! |> list.filter((e) => not list.contains(dropped, e.id))
+    let lines = list.map(kept, (e) => json.stringify(vault.entry_to_value(e)))
+    fs.write(vault.index_path(cfg), list.join(lines, "\n") + (if list.is_empty(lines) then "" else "\n"))!
+  } else ()
+  if verbose then println("gc${if dry then " (dry run)" else ""}: ${int.to_string(list.len(dropped))} vault entries (${compress.human_bytes(freed)}) and ${int.to_string(dropped_sessions)} session records older than ${int.to_string(days)} days") else ()
+}
+
+// At most once per day, from a hook: cheap when there is nothing to do.
+effect fn auto_gc(cfg: config.Config) -> Unit = {
+  guard cfg.retain_days > 0 else ()
+  let marker = "${cfg.home}/.last_gc"
+  let last = fs.modified_at(marker) ?? 0
+  guard env.unix_timestamp() - last > 86400 else ()
+  fs.mkdir_p(cfg.home)!
+  fs.write(marker, int.to_string(env.unix_timestamp()))!
+  cmd_gc(cfg, [], false)!
 }

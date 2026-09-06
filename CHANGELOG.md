@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.0 — 2026-09-06
+- Grep results grouped per file with counts and a capped sample; Glob results as a per-directory tree (shapes taken from cli.js 2.1.x: Grep `content`, Glob `filenames`).
+- SessionStart hook (`compact|resume`): prints a digest of this session's vault entries so the model keeps its vault ids across compaction.
+- `ctxgate statusline`: reads Claude Code's status-line JSON, records the authoritative `context_window.used_percentage` per session (the Budgeter prefers it while fresh), prints one segment; `ctxgate status --line`.
+- Secrets: credential-shaped strings (AWS/GitHub/Anthropic/OpenAI/Slack/Google/Stripe keys, JWTs, bearer tokens, `PASSWORD=`-style assignments, PEM private keys) are masked before the vault, dedup and the model. Small outputs containing one are replaced too. `CTXGATE_REDACT=0` disables.
+- Retention: `ctxgate gc [--days N] [--dry-run]` drops vault entries and session records older than `CTXGATE_RETAIN_DAYS` (14); hooks run it at most once a day.
+- E2E tests: real captured PostToolUse payloads (`tests/hooks/`) piped through `hook_post.run`, checking the envelope Claude Code would receive.
+- Workaround for almide/almide#1931 (top-level record list iteration).
+
 ## 0.7.0 — 2026-09-06
 - rtk delegation: with `rtk` on PATH, Bash commands go through `rtk rewrite` in PreToolUse, honouring rtk's exit-code contract (0 allow, 3 ask, 1/2 untouched). `CTXGATE_RTK=0` disables.
 - `init` now replaces its own hook entries on re-run; PreToolUse matcher is `Bash|Grep`.

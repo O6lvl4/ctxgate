@@ -115,17 +115,49 @@ effect fn record_usage(cfg: config.Config, session_id: String, u: Usage) -> Unit
   ])))!
 }
 
+// Claude Code's status line receives the authoritative `context_window.used_percentage`.
+// `ctxgate statusline` stores it per session; when the record is fresh it beats our own
+// transcript estimate (which cannot see the system prompt or the pending turn).
+let REPORTED_FRESH_SECS = 180
+
+effect fn record_reported(cfg: config.Config, session_id: String, pct: Int) -> Unit = {
+  guard session_id != "" else ()
+  fs.mkdir_p(sessions_dir(cfg))!
+  fs.write("${sessions_dir(cfg)}/${session_id}.reported.json", json.stringify(value.object([
+    ("pct", value.int(pct)), ("ts", value.int(env.unix_timestamp())),
+  ])))!
+}
+
+effect fn reported_pct(cfg: config.Config, session_id: String) -> Option[Int] = {
+  guard session_id != "" else none
+  match fs.read_text_if_exists("${sessions_dir(cfg)}/${session_id}.reported.json") {
+    ok(some(t)) => match json.parse(t) {
+      ok(j) => {
+        let ts = json.get_int(j, "ts") ?? 0
+        if env.unix_timestamp() - ts <= REPORTED_FRESH_SECS then json.get_int(j, "pct") else none
+      },
+      err(_) => none,
+    },
+    _ => none,
+  }
+}
+
 // Resolve the hook's effective config: read usage, record it, tighten. Falls back to the
 // base config if the transcript is unreadable — never blocks a hook.
 effect fn effective(cfg: config.Config, raw_hook_input: String) -> (config.Config, Option[Usage]) = match json.parse(raw_hook_input) {
   err(_) => (cfg, none),
   ok(j) => {
+    let sid = json.get_string(j, "session_id") ?? ""
     let path = json.get_string(j, "transcript_path") ?? ""
     match usage_from_transcript(path) ?? none {
       none => (cfg, none),
       some(used) => {
-        let u = usage_of(cfg, used)
-        record_usage(cfg, json.get_string(j, "session_id") ?? "", u) ?? ()
+        let estimate = usage_of(cfg, used)
+        let u = match reported_pct(cfg, sid) ?? none {
+          some(p) => Usage { used: estimate.used, window: estimate.window, pct: p, level: level_of(cfg, p) },
+          none => estimate,
+        }
+        record_usage(cfg, sid, u) ?? ()
         (apply(cfg, u.level), some(u))
       },
     }
@@ -136,7 +168,7 @@ effect fn effective(cfg: config.Config, raw_hook_input: String) -> (config.Confi
 effect fn latest_session(cfg: config.Config) -> Option[Value] = {
   let dir = sessions_dir(cfg)
   guard fs.exists(dir) else none
-  let names = fs.list_dir(dir) ?? []
+  let names = (fs.list_dir(dir) ?? []) |> list.filter((n) => string.ends_with(n, ".json") and not string.contains(n, ".reported.") and not string.contains(n, ".seen."))
   let stamped = list.filter_map(names, (n) => {
     let p = "${dir}/${n}"
     match fs.modified_at(p) {
@@ -162,7 +194,7 @@ fn test_cfg() -> config.Config = config.Config {
   head: 30, tail: 30, salient: 40, line_clip: 200, grep_head_limit: 60,
   outline_bin: "ctxgate-outline", outline_max: 120, max_block: 20,
   window: 200000, lvl_compress: 40, lvl_aggressive: 60, lvl_isolate: 75,
-  dedup_min: 600, diff_max_cells: 4_000_000, rtk_bin: "", debug: false,
+  dedup_min: 600, diff_max_cells: 4_000_000, rtk_bin: "", redact: true, retain_days: 14, debug: false,
 }
 
 test "levels follow thresholds" {

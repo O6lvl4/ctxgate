@@ -21,6 +21,8 @@ import self.outline
 import self.testout
 import self.gitout
 import self.dedup
+import self.searchout
+import self.redact
 
 type Shape =
   | Stdout
@@ -29,6 +31,7 @@ type Shape =
   | Text
   | Output
   | McpArray
+  | Filenames
   | Unknown
 
 // Which key holds the big text, and the text itself.
@@ -48,7 +51,11 @@ fn extract(resp: Value) -> (Shape, String) = {
             some(s) => (Output, s),
             none => match json.get_array(resp, "content") {
               some(items) => (McpArray, mcp_text(items)),
-              none => (Unknown, ""),
+              none => match json.get_array(resp, "filenames") {
+                // Glob: Claude Code shows the model `filenames` joined by newlines
+                some(names) => (Filenames, names |> list.filter_map((n) => value.as_string(n)?) |> list.join("\n")),
+                none => (Unknown, ""),
+              },
             },
           },
         },
@@ -77,6 +84,8 @@ fn replace(resp: Value, shape: Shape, replacement: String) -> Result[Value, Stri
       list.push(rebuilt, value.object([("type", value.str("text")), ("text", r)]))
       json.set_path(resp, json.field(json.root(), "content"), value.array(rebuilt))
     },
+    Filenames => json.set_path(resp, json.field(json.root(), "filenames"),
+      value.array(string.lines(replacement) |> list.map((l) => value.str(l)))),
     Unknown => err("unknown response shape"),
   }
 }
@@ -104,8 +113,10 @@ effect fn run(cfg: config.Config, raw: String, banner: String) -> Option[String]
     let tool = json.get_string(j, "tool_name") ?? ""
     let input = value.field(j, "tool_input") ?? value.object([])
     let resp = value.field(j, "tool_response") ?? value.null()
-    let (shape, text) = extract(resp)
-    guard text != "" else none
+    let (shape, raw_text) = extract(resp)
+    guard raw_text != "" else none
+    // Secrets are the one thing deliberately not preserved: masked before vault, dedup, model.
+    let (text, redacted) = if cfg.redact then redact.redact(raw_text) else (raw_text, 0)
     let label = label_of(tool, input)
     let sid = json.get_string(j, "session_id") ?? ""
     // Session dedup first: a repeat costs one line, a re-read after an edit costs the diff.
@@ -115,8 +126,14 @@ effect fn run(cfg: config.Config, raw: String, banner: String) -> Option[String]
       dedup.Changed(_, view) => some(view),
       dedup.Fresh => none,
     }
-    match short {
-      some(view) => match replace(resp, shape, if banner == "" then view else banner + "\n" + view) {
+    let banner2 = if redacted > 0 then (if banner == "" then "" else banner + "\n") + "[ctxgate] ${int.to_string(redacted)} credential-shaped value(s) masked as [REDACTED:kind] (CTXGATE_REDACT=0 to disable)." else banner
+    // small but redacted outputs must still be replaced, so the secret never reaches the model
+    let short2 = match short {
+      some(v) => some(v),
+      none => if redacted > 0 and string.len(text) <= config.budget_for(cfg, tool) then some(text) else none,
+    }
+    match short2 {
+      some(view) => match replace(resp, shape, if banner2 == "" then view else banner2 + "\n" + view) {
         ok(updated) => {
           vault.record(cfg, vault.Entry {
             id: seen_id, ts: env.unix_timestamp(), session: sid, tool: tool, label: label,
@@ -129,7 +146,7 @@ effect fn run(cfg: config.Config, raw: String, banner: String) -> Option[String]
       none => {
         let budget = config.budget_for(cfg, tool)
         guard string.len(text) > budget else none
-        match vault_and_replace(cfg, j, tool, input, resp, shape, text, banner) {
+        match vault_and_replace(cfg, j, tool, input, resp, shape, text, banner2) {
       ok(out) => some(out),
       err(e) => {
         eprintln("[ctxgate] post hook fell back to original output: ${e}")
@@ -212,6 +229,18 @@ fn bash_summary(cfg: config.Config, command: String, text: String) -> Option[(St
   }
 }
 
+// Grep content → per-file groups; Glob filenames → per-directory tree. Pure.
+fn search_view(cfg: config.Config, tool: String, shape: Shape, label: String, id: String, text: String) -> Option[String] = {
+  let header = "[ctxgate] ${tool} output: ${int.to_string(compress.line_count(text))} lines / ${compress.human_bytes(string.len(text))} → vaulted as ctx:${id} (NOT in context). full: ctxgate show ${id} --grep <re> | --lines A-B"
+  match shape {
+    Filenames => some(list.join([header] + searchout.glob_tree(string.lines(text), 40, 6), "\n")),
+    _ => if tool == "Grep" then match searchout.grep_content(text, 25, cfg.max_block / 2, cfg.line_clip) {
+      some(body) => some(header + "\n  source: ${compress.clip(label, 200)}\n" + body),
+      none => none,
+    } else none,
+  }
+}
+
 // Bash output from a known test/build runner → that runner's structured summary
 // (totals, failed names, failure stanzas) instead of head/tail. Pure; none = not a runner.
 fn bash_as_runner(cfg: config.Config, command: String, id: String, text: String) -> Option[String] = {
@@ -232,7 +261,7 @@ effect fn vault_and_replace(cfg: config.Config, j: Value, tool: String, input: V
   let id = vault.put(cfg, text)!
   let label = label_of(tool, input)
   let as_outline = if tool == "Read" then read_as_outline(cfg, label, id, resp, text) ?? none else none
-  let as_runner = if tool == "Bash" then bash_as_runner(cfg, label, id, text) else none
+  let as_runner = if tool == "Bash" then bash_as_runner(cfg, label, id, text) else search_view(cfg, tool, shape, label, id, text)
   let rendered = match as_outline {
     some(r) => r,
     none => match as_runner {
