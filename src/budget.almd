@@ -107,7 +107,7 @@ fn banner(u: Usage) -> Option[String] = match u.level {
 // ── session record ────────────────────────────────────────────────────────
 fn sessions_dir(cfg: config.Config) -> String = "${cfg.home}/sessions"
 
-effect fn record_usage(cfg: config.Config, session_id: String, u: Usage, compactions: Int) -> Unit = {
+effect fn record_usage(cfg: config.Config, session_id: String, u: Usage, compactions: Int, transcript: String) -> Unit = {
   guard session_id != "" else ()
   fs.mkdir_p(sessions_dir(cfg))!
   // A new compaction means the model no longer remembers what it saw: the dedup memory for
@@ -123,6 +123,7 @@ effect fn record_usage(cfg: config.Config, session_id: String, u: Usage, compact
   fs.write("${sessions_dir(cfg)}/${session_id}.json", json.stringify(value.object([
     ("session", value.str(session_id)),
     ("compactions", value.int(compactions)),
+    ("transcript", value.str(transcript)),
     ("used", value.int(u.used)),
     ("window", value.int(u.window)),
     ("pct", value.int(u.pct)),
@@ -173,7 +174,7 @@ effect fn effective(cfg: config.Config, raw_hook_input: String) -> (config.Confi
           some(p) => Usage { used: estimate.used, window: estimate.window, pct: p, level: level_of(cfg, p) },
           none => estimate,
         }
-        record_usage(cfg, sid, u, compaction_count(path) ?? 0) ?? ()
+        record_usage(cfg, sid, u, compaction_count(path) ?? 0, path) ?? ()
         (apply(cfg, u.level), some(u))
       },
     }

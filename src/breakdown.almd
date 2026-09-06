@@ -1,0 +1,124 @@
+// breakdown — where the bytes in the context actually come from.
+//
+// ctxgate only governs tool *outputs*. Everything else that is re-sent on every turn — the
+// harness's own attachments (file-change notices, reminders), the model's own Write/Edit/Bash
+// inputs, prose — passes no hook. `ctxgate report` shows this split so a low saving number can
+// be read correctly: is ctxgate weak here, or was the session simply not made of tool output?
+//
+// Measured over the current window: everything after the last compaction summary.
+import fs
+import json
+import value
+
+type Share = { name: String, bytes: Int, count: Int, governed: Bool }
+
+fn size(v: Value) -> Int = string.len(json.stringify(v))
+
+fn text_size(v: Value) -> Int = match value.as_string(v) {
+  ok(s) => string.len(s),
+  err(_) => match value.as_array(v) {
+    ok(items) => list.sum(list.map(items, (i) => string.len(json.get_string(i, "text") ?? json.get_string(i, "content") ?? ""))),
+    err(_) => size(v),
+  },
+}
+
+fn bump(acc: List[Share], name: String, bytes: Int, governed: Bool) -> List[Share] =
+  if list.any(acc, (s) => s.name == name)
+  then list.map(acc, (s) => if s.name == name then Share { ...s, bytes: s.bytes + bytes, count: s.count + 1 } else s)
+  else acc + [Share { name: name, bytes: bytes, count: 1, governed: governed }]
+
+// One transcript line → (category, bytes) pairs. Pure so it is testable on strings.
+fn classify(line: String) -> List[(String, Int, Bool)] = match json.parse(line) {
+  err(_) => [],
+  ok(j) => {
+    let t = json.get_string(j, "type") ?? ""
+    if t == "attachment" then {
+      let a = json.get_path(j, json.field(json.root(), "attachment")) ?? value.object([])
+      [("harness: ${json.get_string(a, "type") ?? "?"}", size(a), false)]
+    } else if t == "user" then {
+      let msg = json.get_path(j, json.field(json.root(), "message")) ?? value.object([])
+      let compact = json.get_bool(j, "isCompactSummary") ?? false
+      match json.get_array(msg, "content") {
+        none => [(if compact then "compaction summary" else "user prompt", string.len(json.get_string(msg, "content") ?? ""), false)],
+        some(items) => list.map(items, (i) => match json.get_string(i, "type") ?? "" {
+          "tool_result" => ("tool output (after ctxgate)", text_size(json.get_path(i, json.field(json.root(), "content")) ?? value.str("")), true),
+          _ => (if compact then "compaction summary" else "user prompt", string.len(json.get_string(i, "text") ?? ""), false),
+        }),
+      }
+    } else if t == "assistant" then {
+      let msg = json.get_path(j, json.field(json.root(), "message")) ?? value.object([])
+      list.filter_map(json.get_array(msg, "content") ?? [], (i) => match json.get_string(i, "type") ?? "" {
+        "text" => some(("assistant text", string.len(json.get_string(i, "text") ?? ""), false)),
+        "tool_use" => some(("${json.get_string(i, "name") ?? "?"} input", size(json.get_path(i, json.field(json.root(), "input")) ?? value.object([])), false)),
+        _ => none,
+      })
+    } else []
+  },
+}
+
+fn is_compaction(line: String) -> Bool = string.contains(line, "\"isCompactSummary\":true")
+
+fn analyze(lines: List[String]) -> List[Share] = {
+  // keep only the current window
+  let starts = list.enumerate(lines) |> list.filter((p) => is_compaction(p.1)) |> list.map((p) => p.0)
+  let window = match list.last(starts) { some(i) => list.drop(lines, i), none => lines }
+  var acc: List[Share] = []
+  for l in window { for c in classify(l) { acc = bump(acc, c.0, c.1, c.2) } }
+  list.sort_by(acc, (s) => 0 - s.bytes)
+}
+
+effect fn analyze_file(path: String) -> List[Share] = match fs.read_lines_if_exists(path) {
+  ok(some(ls)) => analyze(ls),
+  _ => [],
+}
+
+fn pct(part: Int, total: Int) -> Int = if total == 0 then 0 else part * 100 / total
+
+fn pad_left(s: String, w: Int) -> String = if string.len(s) >= w then s else string.repeat(" ", w - string.len(s)) + s
+fn pad_right(s: String, w: Int) -> String = if string.len(s) >= w then s else s + string.repeat(" ", w - string.len(s))
+
+fn render(ss: List[Share], top: Int) -> String = {
+  let total = list.sum(list.map(ss, (s) => s.bytes))
+  let governed = list.sum(list.map(list.filter(ss, (s) => s.governed), (s) => s.bytes))
+  var out: List[String] = []
+  list.push(out, "  context window now ≈ ${int.to_string(total / 1024)} KB (≈${int.to_string(total / 4)} tokens re-sent every turn); tool output — the part ctxgate governs — is ${int.to_string(pct(governed, total))}%")
+  list.push(out, "  ${pad_right("source", 36)} ${pad_left("KB", 7)} ${pad_left("%", 4)} ${pad_left("n", 5)}")
+  for s in list.take(ss, top) {
+    list.push(out, "  ${pad_right(s.name, 36)} ${pad_left(int.to_string(s.bytes / 1024), 7)} ${pad_left(int.to_string(pct(s.bytes, total)), 4)} ${pad_left(int.to_string(s.count), 5)}${if s.governed then "  ← ctxgate" else ""}")
+  }
+  let edited = list.find(ss, (s) => s.name == "harness: edited_text_file")
+  match edited {
+    some(e) => if pct(e.bytes, total) >= 5 then list.push(out, "  hint: ${int.to_string(pct(e.bytes, total))}% is file-change notices — the harness re-sends a diff whenever a file the model has read is changed outside the Edit tool (shell patches, scripts). Use Edit/Write for edits.") else (),
+    none => (),
+  }
+  list.join(out, "\n")
+}
+
+test "classify splits tool results, inputs, attachments" {
+  let tr = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\"abcdef\"}]}}"
+  assert_eq(classify(tr), [("tool output (after ctxgate)", 6, true)])
+  let at = "{\"type\":\"attachment\",\"attachment\":{\"type\":\"edited_text_file\",\"snippet\":\"xx\"}}"
+  let a = list.first(classify(at)) ?? ("", 0, false)
+  assert_eq(a.0, "harness: edited_text_file")
+  assert(not a.2)
+  let asst = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"},{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"ls\"}}]}}"
+  let cs = classify(asst)
+  assert_eq(list.len(cs), 2)
+  assert_eq((list.get(cs, 1) ?? ("", 0, false)).0, "Bash input")
+}
+
+test "analyze keeps only the current window and sorts by size" {
+  let big = "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"0123456789\"}]}}"
+  let compact = "{\"type\":\"user\",\"isCompactSummary\":true,\"message\":{\"content\":\"summary\"}}"
+  let small = "{\"type\":\"user\",\"message\":{\"content\":\"hey\"}}"
+  let ss = analyze([big, big, compact, small])
+  assert_eq(list.len(ss), 2)
+  assert_eq((list.first(ss) ?? Share { name: "", bytes: 0, count: 0, governed: false }).name, "compaction summary")
+  assert(not list.any(ss, (s) => s.governed))
+}
+
+test "render names the governed share" {
+  let r = render([Share { name: "tool output (after ctxgate)", bytes: 4096, count: 2, governed: true }, Share { name: "Write input", bytes: 4096, count: 1, governed: false }], 5)
+  assert(string.contains(r, "is 50%"))
+  assert(string.contains(r, "← ctxgate"))
+}

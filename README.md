@@ -124,6 +124,13 @@ Measured on the sessions that built ctxgate (Claude Code 2.1, 1M-token model):
 Hook overhead is 20–70 ms per call including reading a 2.4 MB transcript. Sizes are bytes;
 token counts are estimated as bytes / 4, the same approximation rtk uses.
 
+What the whole-session number looks like depends on what the session is made of. ctxgate
+governs tool *output* only. The harness's own attachments (file-change notices, reminders,
+files re-attached after a compaction) and the model's own Write/Edit/Bash inputs pass no
+hook. A session that builds a codebase from scratch is mostly the latter and saves ~10%;
+a read/debug/test session is mostly tool output and saves 20–40%. `ctxgate report` prints
+the split for the current session so the number can be read correctly.
+
 ### Benchmark (real tokens)
 
 `bench/bench.almd` runs the same tasks through `claude -p` with and without ctxgate in fresh
@@ -211,7 +218,7 @@ ctxgate list [N]                   recent vault entries
 ctxgate stats                      bytes vaulted vs bytes shown, all time
 ctxgate status                     context usage and budget level of the current session
 ctxgate recall [N]                 recap of the session: files read, timeline of replaced outputs
-ctxgate report                     replacements vs misses per kind, what is softened, savings
+ctxgate report                     replacements vs misses, what is softened, and what fills the context window
 ctxgate doctor                     check the installation (helper, rtk, hooks, CLAUDE.md note, vault)
 ctxgate init [--global]            register the hooks
 ctxgate gc [--days N] [--dry-run]  drop vault entries older than N days

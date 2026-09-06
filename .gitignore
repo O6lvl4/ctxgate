@@ -3,3 +3,4 @@
 /dist/
 *.almdi
 /tools/ctxgate-outline/target/
+/ctxgate

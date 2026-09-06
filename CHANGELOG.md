@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.0 — 2026-09-06
+- `ctxgate report` now shows what actually fills the context window (since the last compaction): tool output vs harness attachments vs the model's own Write/Edit/Bash inputs. ctxgate governs only the first; the table makes a small saving number readable.
+- Finding from the Claude Code binary: a file the model has read that is changed outside Edit/Write (shell patch, script) makes the harness attach its diff (`edited_text_file`, up to 16 KB per turn) — no hook sees it. The CLAUDE.md block now tells the model to edit with Edit/Write. Session records carry the transcript path.
+
 ## 0.10.0 — 2026-09-06
 - A generic replacement that would not shrink the output below 60% is skipped (the original passes through); shorter hint line; `ctxgate doctor`.
 - Budget levels re-tuned from dogfooding at 65%: thresholds fall to 3/4, 1/2, 1/3 (floors 3 KB / 8 KB) instead of 1/2, 1/4, 1.5 KB; views shrink to 15/15 and 10/10 lines instead of 10/10 and 6/6; shorter banner.

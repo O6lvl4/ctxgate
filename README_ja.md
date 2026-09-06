@@ -111,6 +111,12 @@ ctxgate 自身を開発したセッションでの実測（Claude Code 2.1、1M 
 
 hook のオーバーヘッドは 2.4 MB の transcript 読み込み込みで 1 回 20〜70 ms。サイズはバイト、トークンは rtk と同じく bytes / 4 の推定。
 
+セッション全体での削減率は、そのセッションが何でできているかで決まる。ctxgate が管轄するのは
+ツールの *出力* だけ。ハーネス自身の添付（ファイル変更通知、リマインダー、compaction 後に再添付
+されるファイル）と、モデル自身の Write/Edit/Bash 入力は hook を通らない。ゼロからコードを書く
+セッションは後者が大半で 1 割程度、読む・デバッグする・テストを回すセッションはツール出力が
+大半で 2〜4 割になる。`ctxgate report` が今のセッションの内訳を出すので、数字の読み方が分かる。
+
 ### ベンチマーク（実トークン）
 
 `bench/bench.almd` は同じタスクを `claude -p` で ctxgate あり・なしの新しい clone で走らせ、JSON 結果の実 usage を読む。rtk のコードベース（10 万行、1,700 コミット）に対する読み取り専用の探索タスク 5 本、Sonnet、各 1 回。1 行ずつはノイズ、合計が信号:
@@ -184,7 +190,7 @@ ctxgate list [N]                   最近の vault エントリ
 ctxgate stats                      累計: 退避したバイト数と見せたバイト数
 ctxgate status                     現在のセッションの使用量と予算レベル
 ctxgate recall [N]                 セッションの要約: 読んだファイル、置換した出力の時系列
-ctxgate report                     種類別の置換数と miss、緩めているもの、節約量
+ctxgate report                     種類別の置換数と miss、緩めているもの、コンテキストを埋めているものの内訳
 ctxgate doctor                     導入状態の点検（helper、rtk、hooks、CLAUDE.md、vault）
 ctxgate init [--global]            hook の登録
 ctxgate gc [--days N] [--dry-run]  N 日より古い vault エントリを削除
