@@ -1,6 +1,7 @@
 # Changelog
 
 ## 0.11.0 — 2026-09-06
+- NORMAL is turn-safe: defaults Bash/Grep/Other 30 KB, Read 1 MB (only outputs Claude Code itself truncates, plus repeats, are replaced); levels are absolute (COMPRESS 8k/60k, AGGRESSIVE 4k/24k, ISOLATE 3k/12k for Bash/Read) and never touch Grep/Glob. n=3 Sonnet bench: 0.10 defaults were +13% worse; 0.11 is neutral on short tasks and −16% / −22% with the levels forced on the two long tasks, 3/3 success throughout.
 - `ctxgate report` now shows what actually fills the context window (since the last compaction): tool output vs harness attachments vs the model's own Write/Edit/Bash inputs. ctxgate governs only the first; the table makes a small saving number readable.
 - Finding from the Claude Code binary: a file the model has read that is changed outside Edit/Write (shell patch, script) makes the harness attach its diff (`edited_text_file`, up to 16 KB per turn) — no hook sees it. The CLAUDE.md block now tells the model to edit with Edit/Write. Session records carry the transcript path.
 

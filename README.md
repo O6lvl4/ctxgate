@@ -176,10 +176,21 @@ Success was 15/15 in both modes, both times. The honest reading:
   why 0.11 only summarises outputs Claude Code would truncate anyway (persisted >30 KB
   Bash output, where the model sees 2 KB otherwise) and repeats (dedup) until the window is
   under pressure.
-- **Where savings can exist is the long session**: after 40% of the window, on every
-  later turn. `ctxgate report` shows how much of the current window is tool output, which
-  is the ceiling. A benchmark that forces the COMPRESS level from the first turn is in
-  `bench/` next; its numbers go here when they are in, good or bad.
+- **Where savings exist is the squeezed window.** The same two long tasks with the levels
+  forced from the first turn (`CTXGATE_LVL_COMPRESS=0`, AGGRESSIVE at 40%, ISOLATE at 60%),
+  three runs per mode, all 3/3 successful:
+
+  | task, levels forced | off: tokens / turns | on: tokens / turns |
+  |---|---|---|
+  | review `git diff HEAD~8 HEAD` | 884,627 / 14.3 | 736,035 / 12.0 (**−16%**) |
+  | audit `.unwrap()` across `src/` | 1,007,046 / 39.7 | 785,173 / 23.3 (**−22%**) |
+
+  The first attempt at the grep audit failed 2 of 3 runs (+179% tokens, max-turns hit),
+  because the levels also shrank Grep budgets and injected `head_limit`: a withheld match is
+  a re-search. Since 0.11 the levels never touch Grep/Glob; the row above is the re-run.
+  So the shape that holds up is: do nothing while the window is roomy, squeeze Bash, Read
+  and diffs once it is not, never squeeze search. All numbers are Sonnet; other models are
+  not measured yet.
 
 Run it yourself: `almide run bench/bench.almd -- --repo <clone> --runs 3 --model sonnet`.
 
