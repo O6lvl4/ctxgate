@@ -1,7 +1,7 @@
 # ctxgate
 
-Claude Code のコンテキスト・ファイアウォール。ツールの hook に入り、生の出力を全部ローカルの
-金庫に残した上で、モデルにどれだけ見せるかを決める。
+Claude Code のコンテキスト・ファイアウォール。ツールの hook に入り、生の出力はすべてローカルの
+vault に保存しておき、モデルにどこまで見せるかを決める。
 
 [English](README.md) · [Changelog](CHANGELOG.md)
 
@@ -10,7 +10,7 @@ Claude Code のコンテキスト・ファイアウォール。ツールの hook
 1. **窓に余裕がある間は、何もしない。** モデルは ctxgate なしと同じ出力を見る。
    計測済み: トークン数も答えも同じ。
 2. **窓が 40% 埋まったら、絞る。** 大きい Bash 出力、大きい Read、`git diff` を短い表示
-   （テストの結果、シンボル一覧、ファイル表）に置き換え、生の本文は id 付きで金庫に残す。
+   （テストの結果、シンボル一覧、ファイル表）に置き換え、生の本文は id 付きで vault に保存する。
    Sonnet での計測: 長いタスクで入力トークン 16〜22% 減、成功率は変わらず。
 3. **検索は絶対に絞らない。** Grep / Glob の結果はモデルが探しているものそのもの。
    隠せば再検索になるだけ。
@@ -19,7 +19,7 @@ Claude Code のコンテキスト・ファイアウォール。ツールの hook
 
 - **繰り返し** — 変わっていないファイルの再 Read、同じコマンドの再実行は 1 行になる。
 - **巨大な出力** — Claude Code 自身が 2 KB に切り詰める出力が、ちゃんとした要約になる。
-- **compaction 後の recall** — 何を見たかの時系列を金庫の id 付きで返す。
+- **compaction 後の recall** — 何を見たかの時系列を vault の id 付きで返す。
 - **秘密情報** — 認証情報らしき文字列はモデルに届く前にマスクする。
 - **report** — `ctxgate report` が窓を埋めているものの内訳を出す: ツール出力、ハーネスの添付、
   自分の編集。ctxgate が縮められるのは最初の一つだけ。
@@ -111,17 +111,21 @@ almide run bench/bench.almd -- --repo <clone> --runs 3 --model sonnet
 
 ```
 ctxgate show <id> [--grep RE] [--around RE N] [--lines A-B] [--head N] [--tail N] [--symbol NAME]
-ctxgate recall [N]                 読んだファイル + 置換した出力の時系列（compaction の後に）
-ctxgate report                     置換、miss、窓を埋めているものの内訳
-ctxgate status                     今のセッションのコンテキスト使用率とレベル
-ctxgate list [N] · stats · gc      金庫
-ctxgate outline <file>             シンボル一覧
-ctxgate summarize "<command>"      stdin → hook が作る表示
-ctxgate init [--global] · doctor   セットアップ
-ctxgate statusline                 ステータスライン用の断片（Claude Code の status JSON を流し込む）
+                                   vault から必要な部分だけ取り出す
+ctxgate recall [N]                 このセッションで読んだファイルと、置き換えた出力の時系列（compaction 後に使う）
+ctxgate report                     置き換えた回数、モデルが取りに戻った回数、窓を占めているものの内訳
+ctxgate status                     現在のコンテキスト使用率とレベル
+ctxgate list [N]                   vault の最近のエントリ
+ctxgate stats                      保存したバイト数と見せたバイト数の累計
+ctxgate gc [--days N]              古いエントリを削除
+ctxgate outline <file>             ソースファイルのシンボル一覧
+ctxgate summarize "<command>"      stdin の内容を hook と同じ形に要約して表示
+ctxgate init [--global]            hook を登録する
+ctxgate doctor                     インストール状態の確認
+ctxgate statusline                 ステータスライン用の 1 区画（Claude Code の status JSON を stdin に渡す）
 ```
 
-id は一意に決まる範囲で短くしてよい。
+id は他と区別できる長さまで省略できる。
 
 ## 設定
 
@@ -133,9 +137,9 @@ id は一意に決まる範囲で短くしてよい。
 | `CTXGATE_WINDOW` | auto | 窓のトークン数（モデル名に `[1m]` があれば 1M、なければ 200k） |
 | `CTXGATE_MAX_BASH` / `_READ` | 30000 / 1000000 | NORMAL で Bash / Read を置き換えるバイト数。レベルで 8k/60k、4k/24k、3k/12k に下がる |
 | `CTXGATE_REDACT` | 1 | 秘密情報のマスク（0 で無効） |
-| `CTXGATE_RETAIN_DAYS` | 14 | 金庫の保持日数（0 で無期限） |
+| `CTXGATE_RETAIN_DAYS` | 14 | vault の保持日数（0 で無期限） |
 | `CTXGATE_RTK` | 1 | rtk 委譲（0 で無効） |
-| `CTXGATE_HOME` | `~/.ctxgate` | 金庫の場所 |
+| `CTXGATE_HOME` | `~/.ctxgate` | vault の置き場所 |
 
 その他: `CTXGATE_HEAD` / `_TAIL`（30）、`_SALIENT`（40）、`_LINE_CLIP`（200）、`_MAX_BLOCK`（20）、
 `_OUTLINE_MAX`（120）、`_DEDUP_MIN`（600）、`_MAX_GREP` / `_MAX_OTHER`（30000）。
