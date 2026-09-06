@@ -127,9 +127,10 @@ token counts are estimated as bytes / 4, the same approximation rtk uses.
 What the whole-session number looks like depends on what the session is made of. ctxgate
 governs tool *output* only. The harness's own attachments (file-change notices, reminders,
 files re-attached after a compaction) and the model's own Write/Edit/Bash inputs pass no
-hook. A session that builds a codebase from scratch is mostly the latter and saves ~10%;
-a read/debug/test session is mostly tool output and saves 20–40%. `ctxgate report` prints
-the split for the current session so the number can be read correctly.
+hook. The session that built ctxgate was mostly the latter (tool output was 22% of its
+window) and saved 10% of cumulative input; a read/debug/test session has more to work with.
+`ctxgate report` prints the split for the current session, which is the ceiling for any
+saving, so the number can be read correctly.
 
 ### Benchmark (real tokens)
 
