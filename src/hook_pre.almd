@@ -17,10 +17,13 @@ import self.config
 
 // Pure: returns the updated tool_input, or none when nothing should change.
 fn rewrite(cfg: config.Config, tool: String, input: Value) -> Option[Value] = match tool {
-  "Grep" => match json.get_int(input, "head_limit") {
-    some(_) => none,
-    none => some(value.merge(input, value.object([("head_limit", value.int(cfg.grep_head_limit))]))),
-  },
+  // Only under budget pressure (levels set grep_head_limit > 0) and only for content mode:
+  // capping `count` / `files_with_matches` just forces the model into more calls.
+  "Grep" => if cfg.grep_head_limit <= 0 or (json.get_string(input, "output_mode") ?? "files_with_matches") != "content" then none
+    else match json.get_int(input, "head_limit") {
+      some(_) => none,
+      none => some(value.merge(input, value.object([("head_limit", value.int(cfg.grep_head_limit))]))),
+    },
   _ => none,
 }
 
@@ -100,7 +103,7 @@ fn test_cfg() -> config.Config = config.Config {
 }
 
 test "grep without head_limit gets one" {
-  let input = value.object([("pattern", value.str("foo")), ("path", value.str("src"))])
+  let input = value.object([("pattern", value.str("foo")), ("path", value.str("src")), ("output_mode", value.str("content"))])
   match rewrite(test_cfg(), "Grep", input) {
     some(v) => {
       assert_eq(json.get_int(v, "head_limit"), some(60))
@@ -121,7 +124,7 @@ test "other tools pass through" {
 }
 
 test "run produces the hook envelope" {
-  let raw = "{\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"x\"}}"
+  let raw = "{\"tool_name\":\"Grep\",\"tool_input\":{\"pattern\":\"x\",\"output_mode\":\"content\"}}"
   match run(test_cfg(), raw) ?? none {
     some(out) => {
       assert(string.contains(out, "\"hookEventName\":\"PreToolUse\""))

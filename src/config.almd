@@ -13,7 +13,7 @@ type Config = {
   tail: Int,             // lines kept from the bottom
   salient: Int,          // max salient (error-ish) lines surfaced
   line_clip: Int,        // longer lines are clipped in the summary
-  grep_head_limit: Int,  // injected into Grep calls that carry no head_limit
+  grep_head_limit: Int,  // injected into Grep calls that carry no head_limit (0 = never; budget levels set it)
   outline_bin: String,   // tree-sitter helper for non-.almd files (CTXGATE_OUTLINE_BIN)
   outline_max: Int,      // max symbols listed in a Read replacement
   max_block: Int,        // max lines kept per failure stanza (test/build summaries)
@@ -49,14 +49,14 @@ effect fn load() -> Config = {
   Config {
     home: home,
     max_bash: env_int("CTXGATE_MAX_BASH", 8000)!,
-    max_read: env_int("CTXGATE_MAX_READ", 12000)!,
+    max_read: env_int("CTXGATE_MAX_READ", 24000)!,
     max_grep: env_int("CTXGATE_MAX_GREP", 8000)!,
     max_other: env_int("CTXGATE_MAX_OTHER", 10000)!,
     head: env_int("CTXGATE_HEAD", 30)!,
     tail: env_int("CTXGATE_TAIL", 30)!,
     salient: env_int("CTXGATE_SALIENT", 40)!,
     line_clip: env_int("CTXGATE_LINE_CLIP", 200)!,
-    grep_head_limit: env_int("CTXGATE_GREP_HEAD_LIMIT", 60)!,
+    grep_head_limit: env_int("CTXGATE_GREP_HEAD_LIMIT", 0)!,
     outline_bin: env.get("CTXGATE_OUTLINE_BIN") ?? "ctxgate-outline",
     outline_max: env_int("CTXGATE_OUTLINE_MAX", 120)!,
     max_block: env_int("CTXGATE_MAX_BLOCK", 20)!,

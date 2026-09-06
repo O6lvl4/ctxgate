@@ -1,26 +1,31 @@
 {
   "repo": "https://github.com/rtk-ai/rtk",
-  "note": "Read-only exploration tasks on a large real codebase. `check` is a regex the final answer must match; the tasks are chosen so that the answer requires reading big files / running searches, which is where ctxgate acts.",
+  "note": "Read-only tasks on a large real codebase (rtk: ~100k lines of Rust, 1,700 commits). Each task is phrased so the natural path produces a large tool output: whole-file Reads, wide greps, git history and diffs, a test run. `check` is a regex the final answer must match.",
   "tasks": [
     {
-      "name": "hunk-header-parser",
-      "prompt": "In src/cmds/git/git.rs, which function parses `@@` hunk headers, and which function flushes the leading context lines kept before a change? Answer with the two function names only, comma separated.",
-      "check": "parse_hunk_header.*flush_leading_context|flush_leading_context.*parse_hunk_header"
+      "name": "main-rs-overview",
+      "prompt": "Read src/main.rs in full and give a structured overview: every top-level `mod` declaration, the name of the CLI struct, the enum that holds the subcommands, and the first 12 variants of that enum in order. Do not guess; read the file.",
+      "check": "Commands|commands"
     },
     {
-      "name": "rewrite-exit-codes",
-      "prompt": "What exit codes can `rtk rewrite` return and what does each mean? The Claude Code hook script under hooks/claude/ documents them. Answer as `code: meaning` lines.",
-      "check": "3.*(ask|prompt)"
+      "name": "git-rs-run-fns",
+      "prompt": "Read src/cmds/git/git.rs and list every function whose name starts with `run_`, in file order, with its starting line number. Then say in one sentence what `compact_diff` does with context lines.",
+      "check": "run_diff"
     },
     {
-      "name": "tee-min-size",
-      "prompt": "In src/core/tee.rs, what is the minimum output size (in bytes) below which raw output is not tee'd to disk, and what is the default maximum number of tee files kept? Answer with the two numbers.",
+      "name": "history-hotspots",
+      "prompt": "Using `git log --stat -60`, tell me which 5 files changed most often in the last 60 commits, with counts, and the subject line of the most recent commit that touched the top file.",
+      "check": "[0-9]"
+    },
+    {
+      "name": "recent-diff-review",
+      "prompt": "Show `git diff HEAD~8 HEAD` and review it: list the files changed with insertions/deletions, name the single change you consider riskiest, and quote the one changed line that justifies it.",
+      "check": "\\+|insert|delet"
+    },
+    {
+      "name": "grep-unwrap-audit",
+      "prompt": "Search the whole src/ tree for `.unwrap()` calls outside `#[cfg(test)]` modules. Report the 5 files with the most occurrences and their counts, and one example line from the top file with its line number.",
       "check": "[0-9]+"
-    },
-    {
-      "name": "cargo-test-filter",
-      "prompt": "Find the function in src/cmds/rust/ that filters `cargo test` output down to failures only, and say which struct or enum it returns or writes into. Answer with the function name and the type name.",
-      "check": "fn|[A-Z][A-Za-z]+"
     }
   ]
 }

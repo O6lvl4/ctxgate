@@ -1,0 +1,26 @@
+[
+  {
+    "task": "tee-min-size",
+    "mode": "off",
+    "run": 1,
+    "ok": true,
+    "in_tokens": 98442,
+    "out_tokens": 259,
+    "cost_usd": 0.1351438,
+    "turns": 2,
+    "ms": 10126,
+    "answer": "Minimum size to trigger tee: **500 bytes** (`MIN_TEE_SIZE`, src/core/tee.rs:8). Default max tee files kept: **20** (`DEFAULT_MAX_FILES`, src/core/tee.rs:11)."
+  },
+  {
+    "task": "tee-min-size",
+    "mode": "on",
+    "run": 1,
+    "ok": true,
+    "in_tokens": 98118,
+    "out_tokens": 235,
+    "cost_usd": 0.13358599999999998,
+    "turns": 2,
+    "ms": 10592,
+    "answer": "In `src/core/tee.rs`: minimum size is **500 bytes** (`MIN_TEE_SIZE`), and the default max number of tee files kept is **20** (`DEFAULT_MAX_FILES`)."
+  }
+]

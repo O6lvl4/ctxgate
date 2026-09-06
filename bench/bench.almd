@@ -36,9 +36,14 @@ effect fn prepare(repo: String, mode: String, tag: String) -> String = {
   let dir = "${env.temp_dir()}/ctxgate-bench/${tag}"
   fs.mkdir_p("${env.temp_dir()}/ctxgate-bench")!
   if fs.exists(dir) then fs.remove_all(dir)! else ()
-  process.exec_status("cp", ["-R", repo, dir])!
+  // a clone, not a copy: full history for git tasks, but no target/ or node_modules/
+  let cl = process.exec_status("git", ["clone", "-q", "file://" + repo, dir])!
+  guard cl.code == 0 else err("git clone failed: ${cl.stderr}")
   if fs.exists("${dir}/.claude/settings.json") then fs.remove("${dir}/.claude/settings.json")! else ()
-  if mode == "on" then { process.exec_status_timeout("ctxgate", ["init"], 10000) |> result.map_err((e) => "ctxgate init: ${e}")!; () } else ()
+  if mode == "on" then {
+    let st = process.exec_status_timeout("sh", ["-c", "cd \"$1\" && ctxgate init", "bench", dir], 10000)!
+    guard st.code == 0 else err("ctxgate init failed: ${st.stderr}")
+  } else ()
   // every run gets its own vault too, so "on" cannot benefit from a warm cache
   dir
 }

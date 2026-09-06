@@ -124,6 +124,16 @@ test "a small output with a secret is still replaced, masked" {
   assert(not string.contains(kept, "AKIAIOSFODNN7EXAMPLE"))
 }
 
+test "a paged Read after a whole-file Read comes back untouched (no dedup, no outline)" {
+  let cfg = cfg_in(fresh_home("paged")!)
+  let whole = fs.read_text("tests/hooks/read_rust.json")!
+  assert(option.is_some(hook_post.run(cfg, whole, "")!))
+  // same file, explicit page: 200 lines ≈ 6 KB, under budget → must pass through as-is
+  let page_content = list.range(0, 200) |> list.map((i) => "line ${int.to_string(i + 1)} of the page") |> list.join("\n")
+  let page = "{\"session_id\":\"e2e-session\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/home/dev/rtk/src/main.rs\",\"offset\":1,\"limit\":200},\"tool_response\":{\"type\":\"text\",\"file\":{\"filePath\":\"/home/dev/rtk/src/main.rs\",\"content\":\"" + string.replace(page_content, "\n", "\\n") + "\",\"numLines\":200,\"startLine\":1,\"totalLines\":4191}}}"
+  assert(option.is_none(hook_post.run(cfg, page, "")!))
+}
+
 test "malformed input → nothing emitted" {
   let cfg = cfg_in(fresh_home("bad")!)
   assert(option.is_none(hook_post.run(cfg, "not json at all", "")!))

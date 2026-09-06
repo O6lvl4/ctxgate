@@ -124,6 +124,38 @@ Measured on the sessions that built ctxgate (Claude Code 2.1, 1M-token model):
 Hook overhead is 20–70 ms per call including reading a 2.4 MB transcript. Sizes are bytes;
 token counts are estimated as bytes / 4, the same approximation rtk uses.
 
+### Benchmark (real tokens)
+
+`bench/bench.almd` runs the same tasks through `claude -p` with and without ctxgate in fresh
+clones and reads the real usage from the JSON result. Five read-only exploration tasks on the
+rtk codebase (100k lines, 1,700 commits), Sonnet, one run each — so treat single rows as noise
+and the total as the signal:
+
+| task | off: input tokens / turns | on: input tokens / turns |
+|---|---|---|
+| read `main.rs` (4,190 lines) and outline it | 123,715 / 2 | 158,097 / 3 |
+| list `run_*` fns in a 4,720-line file | 99,439 / 3 | 99,468 / 3 |
+| `git log --stat -60` hotspots | 148,469 / 3 | 197,758 / 4 |
+| review `git diff HEAD~8 HEAD` | 383,194 / 7 | 637,751 / 11 |
+| audit `.unwrap()` across `src/` (wide greps) | 1,582,949 / 27 | 743,112 / 28 |
+| **total** | **2,337,766** | **1,836,186 (−21%)** |
+
+Success was 5/5 in both modes. Two honest notes:
+
+- **Turns dominate.** Every extra turn re-sends the whole context, so a compressed output that
+  makes the model ask again costs more than the raw output would have. The first run of this
+  benchmark was 6% *worse* than baseline for exactly that reason: paged Reads (`offset`/`limit`)
+  were being deduplicated against the whole-file read, and Grep `head_limit` was injected in
+  `count` mode. Both are fixed; paged Reads now pass through untouched and `head_limit` only
+  applies under budget pressure.
+- **Short tasks are the unfavourable case.** ctxgate's savings compound with session length,
+  because everything it keeps out of the window stays out on every later turn. A 30-turn
+  session with a 4,720-line file in it pays for that file 30 times; a `-p` run pays once. The
+  benchmark above still shows a net gain, but the long-session effect is where the 88% figure
+  from the sessions that built ctxgate comes from.
+
+Run it yourself: `almide run bench/bench.almd -- --repo <clone> --runs 3 --model sonnet`.
+
 ## Capabilities
 
 | | |
