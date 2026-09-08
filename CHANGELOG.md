@@ -6,6 +6,8 @@
 - ctxgate-outline: 11 more tree-sitter grammars with dedicated rules (C, C++, Java, Ruby, C#, PHP, Bash, Lua, Kotlin, Swift, Scala), and every other language known to tree-sitter-language-pack (371) through a generic rule, with grammars downloaded on first use and cached (`TREE_SITTER_LANGUAGE_PACK_CACHE_DIR` overrides the location). `--languages`, `--fetch L…`, `--dump`. Keyword tokens no longer produce phantom symbols. Usable standalone as peek's `PEEK_OUTLINE_BIN`.
 - Generic head/tail view only for outputs over 12 KB and never for model-narrowed commands (grep / sed -n / awk / peek …).
 - The CLAUDE.md note recommends peek; hooks are registered globally by `init --global`.
+- Runner detection by text checks jest/vitest before go: jest's per-file `FAIL ./x.spec.js` satisfied the go package-line test, so 7 KB of jest failures came out as "go test: FAILED; packages: 0 ok, 1 failed" with every assertion dropped. A go package line now needs a duration or a bracketed reason.
+- `ctxgate summarize` never returns something longer than its input: a 1,000-byte Catch2 report had come back as 1,618 bytes of vault header, "salient" lines and head. Short input passes through unchanged.
 
 ## 0.11.0 — 2026-09-06
 - NORMAL is turn-safe: defaults Bash/Grep/Other 30 KB, Read 1 MB (only outputs Claude Code itself truncates, plus repeats, are replaced); levels are absolute (COMPRESS 8k/60k, AGGRESSIVE 4k/24k, ISOLATE 3k/12k for Bash/Read) and never touch Grep/Glob. n=3 Sonnet bench: 0.10 defaults were +13% worse; 0.11 is neutral on short tasks and −16% / −22% with the levels forced on the two long tasks, 3/3 success throughout.

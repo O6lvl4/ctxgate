@@ -306,9 +306,20 @@ effect fn cmd_summarize(cfg: config.Config, command: String) -> Unit = {
     some((_, s)) => println(s),
     none => {
       let s = compress.summarize(text, cfg.head, cfg.tail, cfg.salient, cfg.line_clip)
-      println(compress.render("Bash", command, "-", s))
+      println(shorter_of(text, compress.render("Bash", command, "-", s)))
     },
   }
+}
+
+// A summary that is not shorter than its input is not a summary. A 1,000-byte
+// Catch2 report came back as 1,618 bytes of vault header, "salient" lines and
+// head — worse than the report. Here there is no vault to point at either.
+fn shorter_of(text: String, rendered: String) -> String =
+  if string.len(rendered) < string.len(text) then rendered else text
+
+test "shorter_of passes a short input through unchanged" {
+  assert_eq(shorter_of("ab", "a much longer rendering of ab"), "ab")
+  assert_eq(shorter_of("a long input that is really long", "short"), "short")
 }
 
 // ── status (Context Budgeter) ─────────────────────────────────────────────

@@ -40,16 +40,24 @@ fn detect(command: String, text: String) -> Runner = {
 fn detect_by_text(text: String) -> Runner = {
   let lines = string.lines(text)
   let any = (f: fn(String) -> Bool) => list.any(lines, f)
+  // jest and vitest first: their summary lines are unambiguous, and jest's
+  // per-file "FAIL ./react.spec.js" used to satisfy the go package-line
+  // check below — 7 KB of jest failures came out as "go test: FAILED;
+  // packages: 0 ok, 1 failed" with every assertion dropped.
   if any((l) => string.starts_with(l, "test result: ")) then CargoTest
-  else if any((l) => string.starts_with(string.trim(l), "--- FAIL: ") or string.starts_with(string.trim(l), "--- PASS: ") or regex.is_match("^(ok|FAIL)\\s+\\S+", l)) then GoTest
-  else if any((l) => is_pytest_summary(l)) then Pytest
-  else if string.contains(text, " Test Files ") then Vitest
   else if string.contains(text, "Test Suites:") then Jest
+  else if string.contains(text, " Test Files ") then Vitest
+  else if any((l) => string.starts_with(string.trim(l), "--- FAIL: ") or string.starts_with(string.trim(l), "--- PASS: ") or is_go_package_line(l)) then GoTest
+  else if any((l) => is_pytest_summary(l)) then Pytest
   else if regex.is_match("error TS[0-9]+:", text) then Tsc
   else if any((l) => is_rustc_diag(l)) and string.contains(text, "-->") then CargoBuild
   else if any((l) => regex.is_match("^\\S+\\.go:[0-9]+:[0-9]+: ", l)) then GoBuild
   else NoRunner
 }
+
+// `ok  	pkg	0.012s`, `FAIL	pkg	0.5s`, `FAIL	pkg [build failed]` — a package
+// line carries a duration or a bracketed reason. jest's `FAIL ./x.spec.js` has neither.
+fn is_go_package_line(l: String) -> Bool = regex.is_match("^(ok|FAIL)\\s+\\S+\\s+(\\[|[0-9.]+s)", l)
 
 fn is_pytest_summary(l: String) -> Bool =
   string.starts_with(l, "===") and regex.is_match(" in [0-9.]+s", l)
@@ -398,6 +406,11 @@ test "detect from command and from text" {
   assert_eq(detect("npx vitest run", ""), Vitest)
   assert_eq(detect("make test", "running 3 tests\ntest result: ok. 3 passed; 0 failed; 0 ignored"), CargoTest)
   assert_eq(detect("make test", "--- FAIL: TestX (0.00s)\nFAIL\tpkg\t0.1s"), GoTest)
+  assert_eq(detect("make test", "ok  \tpkg\t0.012s"), GoTest)
+  assert_eq(detect("make test", "FAIL\tpkg [build failed]"), GoTest)
+  // jest through `npm test`: the FAIL line is a file, not a package
+  assert_eq(detect("npm test", "FAIL ./react.spec.js\n  ● React module › x\n\n    TypeError: boom\n\nTest Suites: 1 failed, 1 total\nTests:       9 failed, 9 total"), Jest)
+  assert_eq(detect("npm test", "FAIL ./react.spec.js"), NoRunner)
   assert_eq(detect("ls", "hello"), NoRunner)
 }
 
