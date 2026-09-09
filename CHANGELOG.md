@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Codex uses a sandbox-writable temporary vault by default, shared by lifecycle hooks and wrapped commands; `CTXGATE_HOME` still overrides it. Outside Codex, `--codex` selects this store for inspection commands.
 - Codex integration: `init --codex [--global]`, `doctor --codex`, and `exec <program> [args...]`. The wrapper compresses captured text before Codex sees it, preserves normal exit codes, and keeps stderr in the vault. Lifecycle hooks track Codex rollout input usage/window and reset dedup on compaction/resume, without replacing tool results or approving commands. Added offline CLI integration tests; Codex usage savings are not yet benchmarked.
 - CLI argument parsing preserves child `--` separators (for example `ctxgate exec git diff -- src/`).
 - PreToolUse rewrites source reads into peek (`grep -n` on source files → `peek grep`, `sed -n A,Bp` → `--lines`, `cat` / `head -N` / `tail -N` → `peek …`), segment by segment inside compound commands, pipes kept; `CTXGATE_PEEK=0` disables. Live sessions showed agents drifting back to grep within an hour of being told to use peek.

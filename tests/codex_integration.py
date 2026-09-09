@@ -156,6 +156,20 @@ class CodexIntegration(unittest.TestCase):
     def test_missing_program_is_failure(self):
         self.assertNotEqual(self.run_cli("exec", "/nonexistent/ctxgate-program").returncode, 0)
 
+    def test_codex_default_store_is_writable_temp_and_shared_with_hooks(self):
+        self.env.pop("CTXGATE_HOME")
+        self.env["TMPDIR"] = str(self.root)
+        result = self.verbose()
+        self.assertEqual(result.returncode, 101, result.stderr)
+        self.assertIn("vaulted as ctx:", result.stdout)
+        self.assertTrue((self.root / "ctxgate-codex/store").is_dir())
+        # Hook launchers need not inherit CODEX_THREAD_ID: explicit `hook codex`
+        # still resolves the same default store.
+        self.env.pop("CODEX_THREAD_ID")
+        self.hook("compact")
+        self.env["CODEX_THREAD_ID"] = "test-thread"
+        self.assertNotIn("unchanged since", self.verbose().stdout)
+
     def test_child_separator_is_preserved(self):
         result = self.run_cli("exec", sys.executable, "-c", "import sys; print(repr(sys.argv[1:]))", "--", "path with spaces")
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -54,7 +54,15 @@ effect fn main() -> Unit = {
   // env.args strips everything before any `--`, including child arguments.
   let raw_args = list.drop(process.args(), 1)
   let args = if (list.get(raw_args, 0) ?? "") == "--" then list.drop(raw_args, 1) else raw_args
-  let cfg = config.load()!
+  let base = config.load()!
+  let is_codex = option.is_some(env.get("CODEX_THREAD_ID"))
+    or ((list.get(args, 0) ?? "") == "hook" and (list.get(args, 1) ?? "") == "codex")
+    or ((list.get(args, 0) ?? "") != "exec" and list.contains(args, "--codex"))
+  // Codex commands run sandboxed: ~/.ctxgate is usually not writable. Hooks and
+  // wrapped commands must agree on a writable store even before the first hook.
+  let cfg = if is_codex and option.is_none(env.get("CTXGATE_HOME")) then
+    config.Config { ...base, home: env.temp_dir() + "/ctxgate-codex" }
+    else base
   match list.get(args, 0) ?? "help" {
     "hook" => if (list.get(args, 1) ?? "") == "codex" then {
       match codex.run(cfg, list.get(args, 2) ?? "", io.read_all()) ?? none { some(out) => println(out), none => () }

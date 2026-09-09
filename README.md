@@ -99,6 +99,10 @@ approve or rewrite commands. `CODEX_THREAD_ID` connects wrapped commands to the 
 session; without it each invocation uses an independent session and base thresholds.
 `CTXGATE_WINDOW` overrides the reported window. Cached input is already included in
 Codex input tokens; cumulative session usage is not used as context size.
+The Codex default vault is `<system temp directory>/ctxgate-codex`, writable by the
+workspace sandbox. Hooks and commands share it. Outside Codex, add `--codex` to
+`show`, `recall`, `stats`, or `status` to select this store. `CTXGATE_HOME` overrides
+it (choose a sandbox-writable path). Temporary storage may be cleaned by the OS.
 `ctxgate recall`/`stats` show captured outputs; the detailed `report` context breakdown
 is still Claude-specific. Codex token/limit savings have not been benchmarked.
 
