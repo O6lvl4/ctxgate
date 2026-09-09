@@ -1,0 +1,217 @@
+// Codex integration: lifecycle hooks track budget/recall; exec compresses before
+// Codex receives output, preserving the outer tool's exit code and session data.
+import json
+import value
+import fs
+import env
+import process
+import io
+import self.config
+import self.budget
+import self.hook_post
+import self.tune
+import self.dedup
+import self.journal
+import regex
+
+// This label is never executed. Quote arguments so dedup cannot confuse different
+// argv vectors (and so the summary can show exactly what ran).
+fn command_label(args: List[String]) -> String = list.map(args, (arg) =>
+  if arg != "" and regex.is_match("^[a-zA-Z0-9_./:=+-]+$", arg) then arg
+  else "'" + string.replace(arg, "'", "'\"'\"'") + "'") |> list.join(" ")
+
+effect fn exec_command(base: config.Config, args: List[String]) -> Unit = {
+  let argv = if (list.get(args, 0) ?? "") == "--" then list.drop(args, 1) else args
+  guard not list.is_empty(argv) else err("usage: ctxgate exec [--] <program> [args...]")
+  let program = list.get(argv, 0) ?? ""
+  let status = process.exec_status(program, list.drop(argv, 1))!
+  let sid = match env.get("CODEX_THREAD_ID") {
+    some(id) => "codex-" + id,
+    none => "exec-" + int.to_string(env.millis()),
+  }
+  let record = fs.read_text_if_exists(budget.sessions_dir(base) + "/" + sid + ".json") ?? none
+  let state = json.parse(record ?? "{}") ?? value.null()
+  let budget_cfg = match json.get_int(state, "pct") {
+    some(pct) => budget.apply(base, budget.level_of(base, pct)),
+    none => base,
+  }
+  let cfg = tune.adjust(budget_cfg, sid) ?? budget_cfg
+  // A cwd change must not turn an unrelated identical command into a dedup hit.
+  let command = command_label(argv)
+  let label = command + " [cwd=" + (env.cwd() ?? ".") + "; exit=" + int.to_string(status.code) + "]"
+  let text = status.stdout + (if status.stderr == "" then "" else "\n[stderr]\n" + status.stderr)
+  let input = value.object([
+    ("session_id", value.str(sid)),
+    ("tool_name", value.str("Bash")),
+    ("tool_input", value.object([("command", value.str(label))])),
+    ("tool_response", value.object([("output", value.str(text))])),
+  ])
+  // Lifecycle hooks reset dedup when the model forgets the previous output.
+  let result = if hook_post.narrowed_by_model("Bash", command) or string.contains(command, "ctxgate ") then none
+    else hook_post.run(cfg, json.stringify(input), "") ?? none
+  match result {
+    some(out) => {
+      let envelope = json.parse(out) ?? value.null()
+      let hs = value.field(envelope, "hookSpecificOutput") ?? value.null()
+      let updated = value.field(hs, "updatedToolOutput") ?? value.null()
+      match json.get_string(updated, "output") {
+        some(summary) => {
+          println("[ctxgate] command exit code: " + int.to_string(status.code))
+          println(summary)
+        },
+        none => print_original(status.stdout, status.stderr)!,
+      }
+    },
+    none => print_original(status.stdout, status.stderr)!,
+  }
+  // Almide reports signal termination as -1; preserve failure rather than treating
+  // a killed child as success. Exact signal numbers aren't exposed by exec_status.
+  process.exit(if status.code < 0 then 1 else status.code)
+}
+
+effect fn print_original(stdout: String, stderr: String) -> Unit = {
+  io.print(stdout)!
+  if stderr != "" then eprintln(if string.ends_with(stderr, "\n") then string.take(stderr, string.len(stderr) - 1) else stderr) else ()
+}
+
+fn session_input(j: Value) -> Value = value.merge(j, value.object([
+  ("session_id", value.str("codex-" + (json.get_string(j, "session_id") ?? ""))),
+]))
+
+effect fn run(base: config.Config, which: String, raw: String) -> Option[String] = {
+  let original = json.parse(raw) ?? value.null()
+  guard (json.get_string(original, "session_id") ?? "") != "" else none
+  let j = session_input(original)
+  let sid = json.get_string(j, "session_id") ?? ""
+  let (cfg0, _) = budget.effective(base, json.stringify(j)) ?? (base, none)
+  let cfg = tune.adjust(cfg0, sid) ?? cfg0
+  match which {
+    "pre" => {
+      tune.observe_call(cfg, sid, json.get_string(j, "tool_name") ?? "", value.field(j, "tool_input") ?? value.object([])) ?? ()
+      none
+    },
+    "compact" => {
+      dedup.forget_session(cfg, sid) ?? ()
+      journal.mark(cfg, sid, "Codex compaction") ?? ()
+      none
+    },
+    "session" => {
+      // A resumed model may no longer have the previous tool output in context.
+      dedup.forget_session(cfg, sid) ?? ()
+      match journal.recall(cfg, sid, 30) ?? none {
+        none => none,
+        some(text) => some(json.stringify(value.object([
+          ("hookSpecificOutput", value.object([
+            ("hookEventName", value.str("SessionStart")),
+            ("additionalContext", value.str(text)),
+          ])),
+        ]))),
+      }
+    },
+    _ => none,
+  }
+}
+
+fn entry(matcher: String, which: String) -> Value = value.object([
+  ("matcher", value.str(matcher)),
+  ("hooks", value.array([value.object([
+    ("type", value.str("command")),
+    ("command", value.str("ctxgate hook codex " + which)),
+    ("timeout", value.int(15)),
+  ])])),
+])
+
+fn merge_hooks(settings: Value) -> Value = {
+  var hooks = value.field(settings, "hooks") ?? value.object([])
+  for (event, matcher, which) in [
+    ("PreToolUse", "^Bash$", "pre"),
+    ("PreCompact", "", "compact"),
+    ("PostCompact", "", "compact"),
+    ("SessionStart", "startup|resume|compact", "session"),
+  ] {
+    let old = json.get_array(hooks, event) ?? []
+    // Remove only our handlers, preserving other handlers in the same group.
+    let kept = list.filter_map(old, (group) => {
+      let handlers = json.get_array(group, "hooks") ?? []
+      let rest = list.filter(handlers, (h) => not string.starts_with(json.get_string(h, "command") ?? "", "ctxgate hook codex "))
+      if list.is_empty(rest) and not list.is_empty(handlers) then none
+      else some(value.merge(group, value.object([("hooks", value.array(rest))])))
+    })
+    hooks = value.merge(hooks, value.object([(event, value.array(kept + [entry(matcher, which)]))]))
+  }
+  value.merge(settings, value.object([("hooks", hooks)]))
+}
+
+fn valid_hooks(settings: Value) -> Bool = {
+  guard string.starts_with(json.stringify(settings), "{") else false
+  let hooks = value.field(settings, "hooks") ?? value.object([])
+  guard string.starts_with(json.stringify(hooks), "{") else false
+  list.all(["PreToolUse", "PreCompact", "PostCompact", "SessionStart"], (event) => {
+    match value.field(hooks, event)? {
+      none => true,
+      some(groups) => match value.as_array(groups) {
+        err(_) => false,
+        ok(gs) => list.all(gs, (g) => option.is_some(json.get_array(g, "hooks"))),
+      },
+    }
+  })
+}
+
+let NOTE = """
+<!-- ctxgate-codex:begin -->
+## ctxgate
+For verbose non-interactive tests/builds/diffs, run commands through ctxgate:
+- `ctxgate exec cargo test`
+- `ctxgate exec git diff`
+- `ctxgate exec -- sh -c 'your pipeline'` (only when a shell is actually needed)
+It buffers stdout/stderr and returns the child's exit code. Use it for human-readable
+logs only: never for interactive commands, servers, binary output, or output that a
+script must parse. Keep searches and explicit source slices unwrapped.
+Large output may become a summary. Captured text is stored locally under the summary's ctx id. Use `ctxgate show <id> --grep <re>`, `--around <re> N`, or
+`--lines A-B` to retrieve missing details instead of rerunning the original command.
+Use `ctxgate recall` after compaction. Search results and explicitly sliced output
+are left alone. Use `ctxgate outline <file>` when a symbol index is sufficient.
+<!-- ctxgate-codex:end -->
+"""
+
+effect fn init(global: Bool) -> Unit = {
+  let dir = if global then env.get("CODEX_HOME") ?? ((env.get("HOME") ?? ".") + "/.codex") else env.cwd()! + "/.codex"
+  let path = dir + "/hooks.json"
+  let raw = fs.read_text_if_exists(path)! ?? "{}"
+  let settings = json.parse(raw)!
+  guard valid_hooks(settings) else err("invalid hooks.json: expected an object with hook arrays; existing file left unchanged")
+  let next = json.stringify_pretty(merge_hooks(settings)) + "\n"
+  fs.mkdir_p(dir)!
+  if raw != next then {
+    if fs.exists(path) then fs.copy(path, path + ".bak")! else ()
+    fs.write(path, next)!
+  } else ()
+  let md = if global then dir + "/AGENTS.md" else env.cwd()! + "/AGENTS.md"
+  let prev = fs.read_text_if_exists(md)! ?? ""
+  let note = string.trim(NOTE)
+  let updated = match (string.index_of(prev, "<!-- ctxgate-codex:begin -->"), string.index_of(prev, "<!-- ctxgate-codex:end -->")) {
+    (some(a), some(b)) => string.take(prev, a) + note + string.drop(prev, b + string.len("<!-- ctxgate-codex:end -->")),
+    _ => (if prev == "" then "" else string.trim(prev) + "\n\n") + note + "\n",
+  }
+  if prev != updated then fs.write(md, updated)! else ()
+  println("ctxgate Codex hooks written to ${path}; instructions: ${md}")
+  println("Restart Codex and review/trust these hooks with /hooks. Project hooks also require a trusted project.")
+}
+
+effect fn doctor(global: Bool) -> Unit = {
+  let dir = if global then env.get("CODEX_HOME") ?? ((env.get("HOME") ?? ".") + "/.codex") else env.cwd()! + "/.codex"
+  let raw = fs.read_text_if_exists(dir + "/hooks.json")! ?? "{}"
+  let settings = json.parse(raw)!
+  guard valid_hooks(settings) else err("invalid Codex hooks.json")
+  let hooks = value.field(settings, "hooks") ?? value.object([])
+  for (event, which) in [("PreToolUse", "pre"), ("PreCompact", "compact"), ("PostCompact", "compact"), ("SessionStart", "session")] {
+    let groups = json.get_array(hooks, event) ?? []
+    let found = list.any(groups, (g) => list.any(json.get_array(g, "hooks") ?? [], (h) =>
+      (json.get_string(h, "command") ?? "") == "ctxgate hook codex " + which))
+    println((if found then "✓ " else "✗ ") + event)
+  }
+  let md = if global then dir + "/AGENTS.md" else env.cwd()! + "/AGENTS.md"
+  let note = fs.read_text_if_exists(md)! ?? ""
+  println((if string.contains(note, "<!-- ctxgate-codex:begin -->") then "✓ " else "✗ ") + "AGENTS.md instructions")
+  println("Hook trust and enablement must be checked in Codex with /hooks; registration alone does not activate hooks.")
+}

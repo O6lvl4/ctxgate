@@ -1,6 +1,6 @@
 # ctxgate
 
-A context firewall for Claude Code. It sits in the tool hooks, keeps every raw tool output in
+A context firewall for Claude Code, with a Codex CLI integration. It sits in the tool hooks, keeps every raw tool output in
 a local vault, and decides how much of it the model gets to see.
 
 [日本語](README_ja.md) · [Changelog](CHANGELOG.md)
@@ -63,6 +63,54 @@ A second Read of an unchanged file, at any level:
 ```
 
 ## Install
+
+### Codex CLI
+
+Build/install this revision, then register in your project:
+
+```bash
+ctxgate init --codex           # .codex/hooks.json + a managed block in AGENTS.md
+ctxgate doctor --codex
+```
+
+Restart Codex and use `/hooks` to review and trust the registered hooks. Project
+hooks require a trusted project. `--global` uses `$CODEX_HOME` (default `~/.codex`).
+Existing unrelated hooks and instructions are preserved; changed hooks.json is backed up.
+
+The instructions ask Codex to wrap verbose commands:
+
+```bash
+ctxgate exec cargo test
+ctxgate exec git diff -- src/
+ctxgate exec -- sh -c 'cargo test --workspace'  # shell syntax only when needed
+```
+
+`exec` runs the argv directly, buffers stdout/stderr, and uses the existing
+summary/vault/dedup logic. It preserves normal child exit codes, reports a
+signal-terminated child as failure (1), and fails if the program cannot start.
+Small output passes through; summarized output combines the streams, labels stderr,
+and includes the exit code. Stderr without a final newline gets one when passed through.
+Use it for finite, non-interactive text logs, not servers, interactive programs,
+binary output, or output consumed by scripts. It doesn't stream progress.
+
+Codex lifecycle hooks observe recovery calls, read the latest rollout `token_count`
+input usage and model window, and reset dedup around compaction/resume. They never
+approve or rewrite commands. `CODEX_THREAD_ID` connects wrapped commands to the hook
+session; without it each invocation uses an independent session and base thresholds.
+`CTXGATE_WINDOW` overrides the reported window. Cached input is already included in
+Codex input tokens; cumulative session usage is not used as context size.
+`ctxgate recall`/`stats` show captured outputs; the detailed `report` context breakdown
+is still Claude-specific. Codex token/limit savings have not been benchmarked.
+
+This deliberately **does not replace Codex PostToolUse results**: current Codex
+shell hook input can be only the output string, without exit/session metadata, and
+the supported replacement is a feedback message rather than a structured tool result.
+Compressing inside `exec` leaves Codex responsible for its original execution metadata
+and works for commands invoked from code mode as well. See the
+[Codex hook contract](https://learn.chatgpt.com/docs/hooks#posttooluse).
+Only wrapped commands are compressed; this is not a transparent interceptor of every tool.
+
+### Claude Code
 
 ```bash
 almide install github.com/O6lvl4/ctxgate        # one native binary → ~/.local/bin/ctxgate

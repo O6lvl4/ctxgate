@@ -68,6 +68,26 @@ effect fn usage_from_transcript(path: String) -> Option[Int] = {
   }
 }
 
+// Codex rollout token_count events report last-turn usage, not cumulative usage.
+// cached_input_tokens is already included in input_tokens and must not be added.
+fn codex_usage_line(line: String) -> Option[(Int, Int)] = {
+  let j = json.parse(line) ?? value.null()
+  guard (json.get_string(j, "type") ?? "") == "event_msg" else none
+  let p = value.field(j, "payload") ?? value.null()
+  guard (json.get_string(p, "type") ?? "") == "token_count" else none
+  let info = value.field(p, "info") ?? value.null()
+  let last = value.field(info, "last_token_usage") ?? value.null()
+  match (json.get_int(last, "input_tokens"), json.get_int(info, "model_context_window")) {
+    (some(used), some(window)) => if used >= 0 and window > 0 then some((used, window)) else none,
+    _ => none,
+  }
+}
+
+effect fn codex_usage(path: String) -> Option[(Int, Int)] = {
+  guard path != "" and fs.exists(path) else none
+  list.reverse(fs.read_lines(path) ?? []) |> list.filter_map((line) => codex_usage_line(line)) |> list.first()
+}
+
 fn usage_of(cfg: config.Config, used: Int) -> Usage = {
   let pct = if cfg.window <= 0 then 0 else used * 100 / cfg.window
   Usage { used: used, window: cfg.window, pct: pct, level: level_of(cfg, pct) }
@@ -174,22 +194,39 @@ effect fn effective(cfg: config.Config, raw_hook_input: String) -> (config.Confi
   ok(j) => {
     let sid = json.get_string(j, "session_id") ?? ""
     let path = json.get_string(j, "transcript_path") ?? ""
-    match usage_from_transcript(path) ?? none {
+    let is_codex = string.starts_with(sid, "codex-")
+    let measured = if is_codex then codex_usage(path) ?? none else match usage_from_transcript(path) ?? none {
+      some(used) => some((used, cfg.window)), none => none,
+    }
+    match measured {
       none => (cfg, none),
-      some(used) => {
-        let estimate = usage_of(cfg, used)
+      some((used, window)) => {
+        let window_cfg = if is_codex and option.is_none(env.get("CTXGATE_WINDOW")) then config.Config { ...cfg, window: window } else cfg
+        let estimate = usage_of(window_cfg, used)
         let u = match reported_pct(cfg, sid) ?? none {
           some(p) => Usage { used: estimate.used, window: estimate.window, pct: p, level: level_of(cfg, p) },
           none => estimate,
         }
         record_usage(cfg, sid, u, compaction_count(path) ?? 0, path) ?? ()
-        (apply(cfg, u.level), some(u))
+        (apply(window_cfg, u.level), some(u))
       },
     }
   },
 }
 
 // Most recently updated session record, for `ctxgate status`.
+// Inside Codex, never borrow another concurrent thread's usage or recall state.
+effect fn current_session(cfg: config.Config) -> Option[Value] = {
+  match env.get("CODEX_THREAD_ID") {
+    some(id) => {
+      let sid = "codex-" + id
+      let raw = fs.read_text_if_exists(sessions_dir(cfg) + "/" + sid + ".json")! ?? "{}"
+      some(value.merge(json.parse(raw) ?? value.object([]), value.object([("session", value.str(sid))])))
+    },
+    none => latest_session(cfg),
+  }
+}
+
 effect fn latest_session(cfg: config.Config) -> Option[Value] = {
   let dir = sessions_dir(cfg)
   guard fs.exists(dir) else none

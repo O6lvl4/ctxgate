@@ -24,13 +24,16 @@ import self.journal
 import self.dedup
 import self.tune
 import self.breakdown
+import self.codex
 
 let USAGE = """
-ctxgate — agent context firewall for Claude Code
+ctxgate — agent context firewall for Claude Code and Codex
 
 usage:
-  ctxgate hook pre | post | session  hook handlers (read JSON on stdin)
+  ctxgate hook pre | post | session  Claude Code hook handlers (read JSON on stdin)
+  ctxgate hook codex pre | compact | session  Codex hook handlers
   ctxgate show <id> [--grep RE] [--around RE [N]] [--lines A-B] [--head N] [--tail N] [--symbol NAME]
+  ctxgate exec [--] <program> [args...]  run a non-interactive command, compress logs, keep exit code
   ctxgate outline <file>             symbol table (kind, name, line range) of a source file
   ctxgate summarize "<command>"      stdin = that command's output → runner-aware summary (cargo/go/pytest/vitest/jest/tsc)
   ctxgate list [N]                   last N vault entries (default 20)
@@ -38,8 +41,8 @@ usage:
   ctxgate status                     context budget of the latest session (usage, level, thresholds)
   ctxgate recall [N]                 recap of the session: files read, timeline of replaced outputs (for after a compaction)
   ctxgate report                     replacements vs misses, what is softened, and what actually fills the context
-  ctxgate doctor                     check the installation: binaries, hooks, CLAUDE.md note, vault
-  ctxgate init [--global]            add hooks to .claude/settings.json (or ~/.claude/settings.json)
+  ctxgate doctor [--codex] [--global] check the selected integration
+  ctxgate init [--codex] [--global]  register Claude Code or Codex hooks and instructions
   ctxgate gc [--days N] [--dry-run]  drop vault entries older than N days (default CTXGATE_RETAIN_DAYS=14)
   ctxgate path <id>                  print the raw file path
 
@@ -48,10 +51,15 @@ env: CTXGATE_HOME, CTXGATE_MAX_BASH/READ/GREP/OTHER, CTXGATE_HEAD, CTXGATE_TAIL,
 """
 
 effect fn main() -> Unit = {
-  let args = env.args()
+  // env.args strips everything before any `--`, including child arguments.
+  let raw_args = list.drop(process.args(), 1)
+  let args = if (list.get(raw_args, 0) ?? "") == "--" then list.drop(raw_args, 1) else raw_args
   let cfg = config.load()!
   match list.get(args, 0) ?? "help" {
-    "hook" => cmd_hook(cfg, list.get(args, 1) ?? ""),
+    "hook" => if (list.get(args, 1) ?? "") == "codex" then {
+      match codex.run(cfg, list.get(args, 2) ?? "", io.read_all()) ?? none { some(out) => println(out), none => () }
+    } else cmd_hook(cfg, list.get(args, 1) ?? ""),
+    "exec" => codex.exec_command(cfg, list.drop(args, 1)),
     "show" => cmd_show(cfg, list.drop(args, 1)),
     "outline" => cmd_outline(cfg, list.get(args, 1) ?? ""),
     "summarize" => cmd_summarize(cfg, list.get(args, 1) ?? ""),
@@ -61,9 +69,9 @@ effect fn main() -> Unit = {
     "status" => if list.contains(args, "--line") then cmd_status_line(cfg, "") else cmd_status(cfg),
     "recall" => cmd_recall(cfg, list.get(args, 1) ?? "40"),
     "report" => cmd_report(cfg),
-    "doctor" => cmd_doctor(cfg),
+    "doctor" => if list.contains(args, "--codex") then codex.doctor(list.contains(args, "--global")) else cmd_doctor(cfg),
     "statusline" => cmd_statusline(cfg),
-    "init" => cmd_init(cfg, list.contains(args, "--global")),
+    "init" => if list.contains(args, "--codex") then codex.init(list.contains(args, "--global")) else cmd_init(cfg, list.contains(args, "--global")),
     "gc" => cmd_gc(cfg, list.drop(args, 1), true),
     "version" | "--version" | "-V" => println("ctxgate 0.11.0"),
     _ => println(USAGE),
@@ -325,7 +333,7 @@ test "shorter_of passes a short input through unchanged" {
 // ── status (Context Budgeter) ─────────────────────────────────────────────
 effect fn cmd_status(cfg: config.Config) -> Unit = {
   println("ctxgate context budget  (window ${int.to_string(cfg.window / 1000)}k; levels: COMPRESS ≥${int.to_string(cfg.lvl_compress)}%  AGGRESSIVE ≥${int.to_string(cfg.lvl_aggressive)}%  ISOLATE ≥${int.to_string(cfg.lvl_isolate)}%)")
-  match budget.latest_session(cfg) ?? none {
+  match budget.current_session(cfg) ?? none {
     none => println("  no session seen yet (records appear after the first hook call)"),
     some(s) => {
       let used = json.get_int(s, "used") ?? 0
@@ -333,7 +341,10 @@ effect fn cmd_status(cfg: config.Config) -> Unit = {
       let level = json.get_string(s, "level") ?? "NORMAL"
       let sid = json.get_string(s, "session") ?? ""
       println("  session   ${sid}")
-      println("  used      ${int.to_string(used / 1000)}k tokens  (${int.to_string(pct)}%)  → ${level}")
+      if option.is_some(json.get_int(s, "used")) then {
+        println("  used      ${int.to_string(used / 1000)}k tokens  (${int.to_string(pct)}%)  → ${level}")
+        println("  window    ${int.to_string((json.get_int(s, "window") ?? cfg.window) / 1000)}k tokens")
+      } else println("  usage     unknown (base thresholds; no token_count event recorded)")
       let eff = budget.apply(cfg, budget.level_of(cfg, pct))
       println("  effective budgets  bash ${int.to_string(eff.max_bash)}  read ${int.to_string(eff.max_read)}  grep ${int.to_string(eff.max_grep)}  head/tail ${int.to_string(eff.head)}/${int.to_string(eff.tail)}  outline ${int.to_string(eff.outline_max)}")
       let es = vault.entries(cfg)! |> list.filter((e) => e.session == sid)
@@ -372,7 +383,7 @@ effect fn cmd_statusline(cfg: config.Config) -> Unit = {
 
 // One line for a prompt or status bar. `sid` empty → latest session.
 effect fn cmd_status_line(cfg: config.Config, sid_hint: String) -> Unit = {
-  let s = match budget.latest_session(cfg) ?? none {
+  let s = match budget.current_session(cfg) ?? none {
     some(v) => v,
     none => value.object([]),
   }
@@ -412,7 +423,7 @@ effect fn on_compact(cfg: config.Config, raw: String) -> Unit = {
 
 effect fn cmd_recall(cfg: config.Config, n_str: String) -> Unit = {
   let n = int.parse(n_str) ?? 40
-  let sid = match budget.latest_session(cfg) ?? none {
+  let sid = match budget.current_session(cfg) ?? none {
     some(s) => json.get_string(s, "session") ?? "",
     none => "",
   }
@@ -511,7 +522,7 @@ effect fn write_claude_md(path: String) -> Unit = {
 
 // ── report ────────────────────────────────────────────────────────────────
 effect fn cmd_report(cfg: config.Config) -> Unit = {
-  let (sid, transcript) = match budget.latest_session(cfg) ?? none {
+  let (sid, transcript) = match budget.current_session(cfg) ?? none {
     some(s) => (json.get_string(s, "session") ?? "", json.get_string(s, "transcript") ?? ""),
     none => ("", ""),
   }

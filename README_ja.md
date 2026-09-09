@@ -64,6 +64,49 @@ ctxgate show b0c8c343b22f --symbol run_diff
 
 ## インストール
 
+### Codex CLI
+
+このリビジョンをビルド・インストールしたあと、対象プロジェクトで実行します。
+
+```bash
+ctxgate init --codex           # .codex/hooks.json と AGENTS.md に登録
+ctxgate doctor --codex
+```
+
+Codexを再起動し、`/hooks` で登録内容を確認して信頼してください。プロジェクトの信頼も必要です。
+`--global` を付けると `$CODEX_HOME`（既定 `~/.codex`）に登録します。
+既存の別のフックや指示は保持し、変更する hooks.json はバックアップします。
+
+AGENTS.md の指示で、Codexに大きなログを出すコマンドを次のように実行させます。
+
+```bash
+ctxgate exec cargo test
+ctxgate exec git diff -- src/
+ctxgate exec -- sh -c 'cargo test --workspace'
+```
+
+`exec` は引数をそのまま子プロセスへ渡し、stdout/stderrを蓄積して既存の要約・vault・重複検出を適用します。
+通常の終了コードは保持し、シグナル終了は失敗（1）、起動失敗も非ゼロを返します。
+小さな出力はそのまま、大きな出力は終了コードと要約を表示します。要約時はstderrをラベル付きでまとめます。
+そのまま返すstderrに末尾改行がない場合は改行が付きます。
+進捗のストリーミングはしません。終了する非対話コマンドのテキストログ用です。
+サーバー、対話操作、バイナリ出力、プログラムが解析する出力には使わないでください。
+
+フックはCodexのrolloutから最新の入力トークン数とウィンドウ容量を読み、compaction/resumeで重複記憶をリセットします。
+コマンドの承認・書き換えは行いません。`CODEX_THREAD_ID` でコマンドとフックを同一セッションに紐付けます。
+この変数がない場合は実行ごとに独立したセッション・基本の閾値を使います。
+`CTXGATE_WINDOW` による容量の指定も可能です。キャッシュ入力を二重加算せず、累積利用量もコンテキスト量として扱いません。
+保存した出力は `ctxgate recall` / `stats` で確認できます。`report` の詳細なコンテキスト内訳はまだClaude専用です。
+Codexでのトークン数・利用枠の削減率は未計測です。
+
+CodexのPostToolUse入力は終了コードを含まない文字列の場合があり、置換すると実行情報が欠けるため、
+**出力の圧縮は `exec` の内側で行います**。Codex側の終了コードや実行中セッション情報はそのまま維持され、
+code modeからの呼び出しでも同じように使えます。
+[Codexのフック仕様](https://learn.chatgpt.com/docs/hooks#posttooluse)を参照してください。
+圧縮対象は `ctxgate exec` 経由のコマンドです。すべてのツールを透過的に圧縮する機能ではありません。
+
+### Claude Code
+
 ```bash
 almide install github.com/O6lvl4/ctxgate        # ネイティブバイナリが 1 つ → ~/.local/bin/ctxgate
 cd your-project && ctxgate init                 # .claude/settings.json に hook を登録し、CLAUDE.md に案内を追記
