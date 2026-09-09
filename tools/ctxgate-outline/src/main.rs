@@ -2,7 +2,7 @@
 //!
 //! This is the ONLY non-Almide component of ctxgate, and deliberately dumb: it parses
 //! with tree-sitter (16 grammars) and prints JSON. Also usable on its own, e.g. as
-//! `PEEK_OUTLINE_BIN` for https://github.com/O6lvl4/peek. All decisions (what to show, how much) live in the
+//! `HEW_OUTLINE_BIN` for https://github.com/O6lvl4/hew. All decisions (what to show, how much) live in the
 //! Almide side. The contract is the JSON shape below; a future Almide tree-sitter can
 //! replace this binary without touching callers.
 //!

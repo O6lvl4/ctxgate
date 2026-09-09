@@ -121,7 +121,7 @@ Claude Code を再起動するか `/hooks` を実行してください。`ctxgat
 任意で:
 
 ```bash
-# シンボル一覧は peek（Almide の依存として build 時に取得）が作る。このヘルパーはその provider で、
+# シンボル一覧は hew（Almide の依存として build 時に取得）が作る。このヘルパーはその provider で、
 # 16 言語は専用ルール、残り 371 言語は tree-sitter-language-pack 経由で初回使用時に grammar を取得
 #（`ctxgate-outline --languages` で一覧）
 git clone https://github.com/O6lvl4/ctxgate && cd ctxgate/tools/ctxgate-outline
@@ -189,7 +189,7 @@ id は、他と区別できる長さまで省略できます。
 | `CTXGATE_MAX_BASH` / `_READ` | 30000 / 1000000 | NORMAL で Bash / Read の出力を置き換え始めるバイト数。レベルが上がると 8k/60k → 4k/24k → 3k/12k に下がる |
 | `CTXGATE_REDACT` | 1 | 秘密情報のマスク（0 で無効） |
 | `CTXGATE_RETAIN_DAYS` | 14 | vault の保持日数（0 で無期限） |
-| `CTXGATE_PEEK` | 1 | ソースの読み取りを peek に書き換える（0 で無効） |
+| `CTXGATE_HEW` | 1 | ソースの読み取りを hew に書き換える（0 で無効） |
 | `CTXGATE_RTK` | 1 | rtk への委譲（0 で無効） |
 | `CTXGATE_HOME` | `~/.ctxgate` | vault の置き場所 |
 
@@ -208,15 +208,15 @@ id は、他と区別できる長さまで省略できます。
 
 ## 各 hook の役割
 
-- **PreToolUse** — peek が入っていれば、ソースファイルを読むコマンドを [peek](https://github.com/O6lvl4/peek)
-  に書き換えます（`grep -n RE files` → `peek grep`、`sed -n A,Bp FILE` → `peek FILE --lines A-B`、
-  ソースへの `cat` / `head -N` / `tail -N` → `peek …`）。意味が同じ形だけを対象にし、タスクのログや
-  tmp 配下は触りません（`CTXGATE_PEEK=0` で無効）。それ以外の Bash コマンドは rtk があれば渡して書き換えます。要約で隠されたものをモデルが
+- **PreToolUse** — hew が入っていれば、ソースファイルを読むコマンドを [hew](https://github.com/O6lvl4/hew)
+  に書き換えます（`grep -n RE files` → `hew grep`、`sed -n A,Bp FILE` → `hew FILE --lines A-B`、
+  ソースへの `cat` / `head -N` / `tail -N` → `hew …`）。意味が同じ形だけを対象にし、タスクのログや
+  tmp 配下は触りません（`CTXGATE_HEW=0` で無効）。それ以外の Bash コマンドは rtk があれば渡して書き換えます。要約で隠されたものをモデルが
   取りに戻った呼び出し（*miss*）を記録し、miss が続く種類の置き換えはそのセッションの残りで緩めます。
 - **PostToolUse** — 生の出力を `~/.ctxgate/store` に保存し（内容のハッシュで管理）、セッションの
   transcript から現在のコンテキスト量を読んでレベルを決め、ツールが返したのと同じ JSON の形で
-  表示を返します。シンボル一覧は [peek](https://github.com/O6lvl4/peek) が作り、`ctxgate-outline` は
-  peek の tree-sitter provider として差し込まれています。
+  表示を返します。シンボル一覧は [hew](https://github.com/O6lvl4/hew) が作り、`ctxgate-outline` は
+  hew の tree-sitter provider として差し込まれています。
 - **PreCompact / SessionStart** — 繰り返し検出の記憶をリセットし、compaction 後に recap を渡します。
 
 表示の種類: `cargo test` / `go test` / `pytest` / `vitest` / `jest` / `tsc` の結果、`git diff` /

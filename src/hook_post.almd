@@ -268,7 +268,7 @@ fn bash_as_runner(cfg: config.Config, command: String, id: String, text: String)
 let GENERIC_MIN = 12000   // bytes; below this the generic view is not worth a possible retry
 
 fn narrowed_by_model(tool: String, command: String) -> Bool =
-  tool == "Bash" and list.any(["grep ", "rg ", "sed -n", "awk ", "head ", "tail ", "| cut", "jq ", "peek "], (f) => string.contains(command, f))
+  tool == "Bash" and list.any(["grep ", "rg ", "sed -n", "awk ", "head ", "tail ", "| cut", "jq ", "hew "], (f) => string.contains(command, f))
 
 effect fn vault_and_replace(cfg: config.Config, j: Value, tool: String, input: Value, resp: Value, shape: Shape, prefix_text: String, banner: String) -> Result[String, String] = {
   let persisted = option.is_some(json.get_string(resp, "persistedOutputPath"))

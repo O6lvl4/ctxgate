@@ -126,7 +126,7 @@ Restart Claude Code (or run `/hooks`). `ctxgate doctor` checks the setup.
 Optional:
 
 ```bash
-# tree-sitter outlines for the symbol views. Outlines come from peek (an Almide dependency,
+# tree-sitter outlines for the symbol views. Outlines come from hew (an Almide dependency,
 # fetched at build time); this helper is its provider for 16 languages with dedicated rules and
 # 371 more via tree-sitter-language-pack, downloaded on first use (`ctxgate-outline --languages`)
 git clone https://github.com/O6lvl4/ctxgate && cd ctxgate/tools/ctxgate-outline
@@ -189,7 +189,7 @@ Environment variables, no config file. The ones that matter:
 | `CTXGATE_MAX_BASH` / `_READ` | 30000 / 1000000 | bytes before a Bash / Read output is replaced at NORMAL; levels lower them to 8k/60k, 4k/24k, 3k/12k |
 | `CTXGATE_REDACT` | 1 | mask secrets (0 disables) |
 | `CTXGATE_RETAIN_DAYS` | 14 | vault retention (0 keeps forever) |
-| `CTXGATE_PEEK` | 1 | rewrite source reads into peek (0 disables) |
+| `CTXGATE_HEW` | 1 | rewrite source reads into hew (0 disables) |
 | `CTXGATE_RTK` | 1 | rtk delegation (0 disables) |
 | `CTXGATE_HOME` | `~/.ctxgate` | vault location |
 
@@ -205,17 +205,17 @@ model ask again (a *miss*) is softened for the rest of the session, whatever the
 
 ## Hooks
 
-- **PreToolUse** rewrites reads of source files into [peek](https://github.com/O6lvl4/peek)
-  calls when peek is installed (`grep -n RE files` → `peek grep`, `sed -n A,Bp FILE` →
-  `peek FILE --lines A-B`, `cat` / `head -N` / `tail -N` on a source file → `peek …`; only
-  shapes with identical meaning, task logs and tmp files untouched, `CTXGATE_PEEK=0` disables),
+- **PreToolUse** rewrites reads of source files into [hew](https://github.com/O6lvl4/hew)
+  calls when hew is installed (`grep -n RE files` → `hew grep`, `sed -n A,Bp FILE` →
+  `hew FILE --lines A-B`, `cat` / `head -N` / `tail -N` on a source file → `hew …`; only
+  shapes with identical meaning, task logs and tmp files untouched, `CTXGATE_HEW=0` disables),
   hands the rest of the Bash surface to rtk when present, and notes when a call is the model
   going back for something a summary withheld (a *miss*). Kinds that keep missing are softened
   for the rest of the session.
 - **PostToolUse** stores the raw output in `~/.ctxgate/store` (content-addressed), reads the
   current context size from the session transcript, picks the level, and returns a view in the
   same JSON shape the tool produced. Symbol outlines come from
-  [peek](https://github.com/O6lvl4/peek); `ctxgate-outline` is plugged into peek as its
+  [hew](https://github.com/O6lvl4/hew); `ctxgate-outline` is plugged into hew as its
   tree-sitter provider.
 - **PreCompact / SessionStart** reset the repeat memory and hand the recap back after a
   compaction.

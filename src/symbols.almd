@@ -1,22 +1,22 @@
-// symbols — a file's table of contents, from peek (github.com/O6lvl4/peek).
+// symbols — a file's table of contents, from hew (github.com/O6lvl4/hew).
 //
-// peek owns parsing: Almide, Rust, Go, TypeScript/JavaScript and Python are built in, and any
-// tree-sitter provider that speaks peek's `PEEK_OUTLINE_BIN` contract covers the rest. ctxgate
+// hew owns parsing: Almide, Rust, Go, TypeScript/JavaScript and Python are built in, and any
+// tree-sitter provider that speaks hew's `HEW_OUTLINE_BIN` contract covers the rest. ctxgate
 // points that hook at its own helper (`ctxgate-outline`, tree-sitter, 371 languages) unless
 // the user has set it already. This module only keeps what is ctxgate's: the compact rendering
 // with test-symbol collapsing, and the lookup used by `ctxgate show --symbol`.
 import fs
 import env
-import peek.outline as pk
+import hew.outline as pk
 import self.config
 import self.compress
 
-// Names differ from peek's on purpose: same-named definitions across an import shadow each
+// Names differ from hew's on purpose: same-named definitions across an import shadow each
 // other in Almide's test build (almide/almide issue).
 type TocEntry = { kind: String, name: String, start: Int, end: Int }
 type Toc = { lang: String, total_lines: Int, symbols: List[TocEntry] }
 
-fn from_peek(o: pk.Outline) -> Toc = Toc {
+fn from_hew(o: pk.Outline) -> Toc = Toc {
   lang: o.lang,
   total_lines: o.total_lines,
   symbols: list.map(o.symbols, (s) => TocEntry { kind: s.kind, name: s.name, start: s.start, end: s.end }),
@@ -24,9 +24,9 @@ fn from_peek(o: pk.Outline) -> Toc = Toc {
 
 // ── entry point (effect) ──────────────────────────────────────────────────
 effect fn of_file(cfg: config.Config, path: String) -> Result[Toc, String] = {
-  let provider = match env.get("PEEK_OUTLINE_BIN") { some(b) => some(b), none => if cfg.outline_bin == "" then none else some(cfg.outline_bin) }
+  let provider = match env.get("HEW_OUTLINE_BIN") { some(b) => some(b), none => if cfg.outline_bin == "" then none else some(cfg.outline_bin) }
   let lines = string.lines(fs.read_text(path)!)
-  ok(from_peek(pk.of_file_with(path, lines, provider)!))
+  ok(from_hew(pk.of_file_with(path, lines, provider)!))
 }
 
 // ── lookup / render (pure) ────────────────────────────────────────────────
@@ -65,9 +65,9 @@ fn render_toc(o: Toc, max: Int) -> List[String] = {
 fn pad_r(s: String, width: Int) -> String =
   if string.len(s) >= width then s else s + string.repeat(" ", width - string.len(s))
 
-test "peek's Almide outline comes through with tight ranges" {
+test "hew's Almide outline comes through with tight ranges" {
   let src = "import fs\n\ntype Point = { x: Int }\n\n// doc\nfn add(a: Int, b: Int) -> Int = a + b\n\neffect fn main() -> Unit = {\n  println(\"hi\")\n}\n\ntest \"adds\" {\n  assert_eq(add(1, 2), 3)\n}\n"
-  let o = from_peek(pk.of_lines("almide", string.lines(src)))
+  let o = from_hew(pk.of_lines("almide", string.lines(src)))
   assert_eq(o.lang, "almide")
   assert_eq(list.map(o.symbols, (s) => s.name), ["Point", "add", "main", "adds"])
   match find_entry(o, "main") {

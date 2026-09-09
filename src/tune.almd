@@ -121,7 +121,7 @@ test "softening needs both a count and a rate" {
     home: "/tmp", max_bash: 8000, max_read: 24000, max_grep: 8000, max_other: 10000,
     head: 30, tail: 30, salient: 40, line_clip: 200, grep_head_limit: 0,
     outline_bin: "", outline_max: 120, max_block: 20, window: 200000, lvl_compress: 40, lvl_aggressive: 60, lvl_isolate: 75,
-    dedup_min: 600, diff_max_cells: 4_000_000, rtk_bin: "", peek_rw: false, redact: true, retain_days: 14, debug: false,
+    dedup_min: 600, diff_max_cells: 4_000_000, rtk_bin: "", hew_rw: false, redact: true, retain_days: 14, debug: false,
   }
   let soft = apply(cfg, ["read_outline", "dedup"])
   assert_eq(soft.max_read, 72000)

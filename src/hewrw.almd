@@ -1,15 +1,15 @@
-// peekrw — rewrite shell reads of source files into peek calls (github.com/O6lvl4/peek).
+// hewrw — rewrite shell reads of source files into hew calls (github.com/O6lvl4/hew).
 //
-// Agents told to use peek drift back to `grep -n`, `sed -n A,Bp`, `cat` within an hour. The
+// Agents told to use hew drift back to `grep -n`, `sed -n A,Bp`, `cat` within an hour. The
 // PreToolUse hook makes the choice for them: a Bash command whose segments read source files
-// with those tools is rewritten, segment by segment, into the equivalent peek call. Only shapes
+// with those tools is rewritten, segment by segment, into the equivalent hew call. Only shapes
 // whose meaning is identical are touched:
-//   grep [-n -r -R -E -e] RE <source paths…>   → peek grep 'RE' <paths…>
-//   sed -n A,Bp FILE                            → peek FILE --lines A-B
-//   cat FILE                                    → peek FILE
-//   head -N FILE  /  tail -N FILE               → peek FILE --head N / --tail N
+//   grep [-n -r -R -E -e] RE <source paths…>   → hew grep 'RE' <paths…>
+//   sed -n A,Bp FILE                            → hew FILE --lines A-B
+//   cat FILE                                    → hew FILE
+//   head -N FILE  /  tail -N FILE               → hew FILE --head N / --tail N
 // Anything else in the segment (pipes after it, other flags, files under tmp / task logs,
-// patterns peek's regex cannot take) leaves the segment alone. Pure; tested on strings.
+// patterns hew's regex cannot take) leaves the segment alone. Pure; tested on strings.
 import regex
 
 let SOURCE_EXT = ["rs", "almd", "go", "ts", "tsx", "js", "jsx", "py", "md", "toml", "yaml", "yml", "json", "lean", "c", "h", "cpp", "hpp", "java", "rb", "kt", "swift", "scala", "ex", "exs", "hs", "ml", "zig", "sh", "lua", "cs", "php", "sql", "proto"]
@@ -63,7 +63,7 @@ fn rw_grep(ts: List[String]) -> Option[String] = {
   guard not bad and pat != "" and not list.is_empty(paths) else none
   guard not string.contains(pat, "\\b") and not string.contains(pat, "'") and not string.contains(pat, "$") else none
   guard list.all(paths, (p) => source_like(p)) else none
-  some("peek grep ${squote(pat)} ${list.join(paths, " ")}")
+  some("hew grep ${squote(pat)} ${list.join(paths, " ")}")
 }
 
 fn rw_sed(ts: List[String]) -> Option[String] = {
@@ -72,9 +72,9 @@ fn rw_sed(ts: List[String]) -> Option[String] = {
   let file = list.get(ts, 3) ?? ""
   guard source_like(file) else none
   match regex.captures("^([0-9]+),([0-9]+)p$", range) {
-    some(cs) => some("peek ${file} --lines ${list.get(cs, 1) ?? ""}-${list.get(cs, 2) ?? ""}"),
+    some(cs) => some("hew ${file} --lines ${list.get(cs, 1) ?? ""}-${list.get(cs, 2) ?? ""}"),
     none => match regex.captures("^([0-9]+)p$", range) {
-      some(cs) => some("peek ${file} --lines ${list.get(cs, 1) ?? ""}-${list.get(cs, 1) ?? ""}"),
+      some(cs) => some("hew ${file} --lines ${list.get(cs, 1) ?? ""}-${list.get(cs, 1) ?? ""}"),
       none => none,
     },
   }
@@ -84,7 +84,7 @@ fn rw_cat(ts: List[String]) -> Option[String] = {
   guard list.len(ts) == 2 and (list.first(ts) ?? "") == "cat" else none
   let file = list.get(ts, 1) ?? ""
   guard source_like(file) and not string.starts_with(file, "-") else none
-  some("peek ${file}")
+  some("hew ${file}")
 }
 
 fn rw_headtail(ts: List[String]) -> Option[String] = {
@@ -94,7 +94,7 @@ fn rw_headtail(ts: List[String]) -> Option[String] = {
     else if list.len(ts) == 4 and (list.get(ts, 1) ?? "") == "-n" and regex.is_match("^[0-9]+$", list.get(ts, 2) ?? "") then (list.get(ts, 2) ?? "", list.get(ts, 3) ?? "")
     else ("", "")
   guard n != "" and source_like(file) else none
-  some("peek ${file} --${cmd} ${n}")
+  some("hew ${file} --${cmd} ${n}")
 }
 
 fn rw_segment(seg: String) -> Option[String] = {
@@ -134,26 +134,26 @@ fn rewrite_reads(command: String) -> Option[String] = {
   if changed then some(out) else none
 }
 
-test "grep on source files becomes peek grep, pipes kept" {
-  assert_eq(rewrite_reads("grep -n 'fn apply' src/budget.almd | head -5"), some("peek grep 'fn apply' src/budget.almd | head -5"))
-  assert_eq(rewrite_reads("grep -rnE \"resolve_type_expr(_in)?\\(\" crates/almide-frontend/src"), some("peek grep 'resolve_type_expr(_in)?\\(' crates/almide-frontend/src"))
+test "grep on source files becomes hew grep, pipes kept" {
+  assert_eq(rewrite_reads("grep -n 'fn apply' src/budget.almd | head -5"), some("hew grep 'fn apply' src/budget.almd | head -5"))
+  assert_eq(rewrite_reads("grep -rnE \"resolve_type_expr(_in)?\\(\" crates/almide-frontend/src"), some("hew grep 'resolve_type_expr(_in)?\\(' crates/almide-frontend/src"))
   assert_eq(rewrite_reads("grep -c foo src/a.rs"), none)                       // -c changes the meaning
   assert_eq(rewrite_reads("grep -n foo /private/tmp/x/tasks/b.output"), none)  // task logs are not source
   assert_eq(rewrite_reads("grep -n 'foo\\b' src/a.rs"), none)                  // \\b unsupported
 }
 
 test "sed cat head tail" {
-  assert_eq(rewrite_reads("sed -n 12,28p crates/x/registration.rs"), some("peek crates/x/registration.rs --lines 12-28"))
-  assert_eq(rewrite_reads("sed -n '5p' a.rs"), some("peek a.rs --lines 5-5"))
-  assert_eq(rewrite_reads("cat src/main.almd"), some("peek src/main.almd"))
+  assert_eq(rewrite_reads("sed -n 12,28p crates/x/registration.rs"), some("hew crates/x/registration.rs --lines 12-28"))
+  assert_eq(rewrite_reads("sed -n '5p' a.rs"), some("hew a.rs --lines 5-5"))
+  assert_eq(rewrite_reads("cat src/main.almd"), some("hew src/main.almd"))
   assert_eq(rewrite_reads("cat /private/tmp/x/tasks/b.output | tail -2"), none)
-  assert_eq(rewrite_reads("head -30 src/a.rs | cut -c1-160"), some("peek src/a.rs --head 30 | cut -c1-160"))
-  assert_eq(rewrite_reads("tail -n 20 src/a.rs"), some("peek src/a.rs --tail 20"))
+  assert_eq(rewrite_reads("head -30 src/a.rs | cut -c1-160"), some("hew src/a.rs --head 30 | cut -c1-160"))
+  assert_eq(rewrite_reads("tail -n 20 src/a.rs"), some("hew src/a.rs --tail 20"))
 }
 
 test "compound commands: only the reading segments change" {
   let cmd = "L=/x/land; cd $L; echo \"== helpers\"; grep -n 'fn helper' src/a.rs | head -3 && sed -n 10,20p src/b.rs"
-  assert_eq(rewrite_reads(cmd), some("L=/x/land; cd $L; echo \"== helpers\"; peek grep 'fn helper' src/a.rs | head -3 && peek src/b.rs --lines 10-20"))
+  assert_eq(rewrite_reads(cmd), some("L=/x/land; cd $L; echo \"== helpers\"; hew grep 'fn helper' src/a.rs | head -3 && hew src/b.rs --lines 10-20"))
   assert_eq(rewrite_reads("cargo test --workspace 2>&1 | tail -3"), none)
   assert_eq(rewrite_reads("echo 'grep -n x y.rs'"), none)
 }

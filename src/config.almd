@@ -24,7 +24,7 @@ type Config = {
   dedup_min: Int,        // outputs at least this big take part in session dedup (0 disables)
   diff_max_cells: Int,   // LCS budget for "changed since last seen" diffs
   rtk_bin: String,       // rtk binary for Bash rewrites ("" = off; CTXGATE_RTK=0 or CTXGATE_RTK_BIN)
-  peek_rw: Bool,         // rewrite grep/sed/cat/head/tail on source files into peek (CTXGATE_PEEK=0 disables; needs peek on PATH)
+  hew_rw: Bool,          // rewrite grep/sed/cat/head/tail on source files into hew (CTXGATE_HEW=0 disables; needs hew on PATH)
   redact: Bool,          // mask credential-shaped strings before vault/model (CTXGATE_REDACT=0 disables)
   retain_days: Int,      // vault entries older than this are removed by gc (CTXGATE_RETAIN_DAYS; 0 = keep forever)
   debug: Bool,           // CTXGATE_DEBUG=1 dumps raw hook stdin under <home>/debug
@@ -68,7 +68,7 @@ effect fn load() -> Config = {
     dedup_min: env_int("CTXGATE_DEDUP_MIN", 600)!,
     diff_max_cells: env_int("CTXGATE_DIFF_MAX_CELLS", 4_000_000)!,
     rtk_bin: if (env.get("CTXGATE_RTK") ?? "1") == "0" then "" else env.get("CTXGATE_RTK_BIN") ?? "rtk",
-    peek_rw: (env.get("CTXGATE_PEEK") ?? "1") != "0" and peek_available()!,
+    hew_rw: (env.get("CTXGATE_HEW") ?? "1") != "0" and hew_available()!,
     redact: (env.get("CTXGATE_REDACT") ?? "1") != "0",
     retain_days: env_int("CTXGATE_RETAIN_DAYS", 14)!,
     debug: (env.get("CTXGATE_DEBUG") ?? "") == "1",
@@ -83,8 +83,8 @@ fn budget_for(cfg: Config, tool: String) -> Int = match tool {
   _ => cfg.max_other,
 }
 
-// peek on PATH? Checked once per hook call (a few ms); PATH is scanned rather than spawning.
-effect fn peek_available() -> Result[Bool, String] = {
+// hew on PATH? Checked once per hook call (a few ms); PATH is scanned rather than spawning.
+effect fn hew_available() -> Result[Bool, String] = {
   let dirs = string.split(env.get("PATH") ?? "", ":")
-  ok(list.any(dirs, (d) => fs.exists(d + "/peek")))
+  ok(list.any(dirs, (d) => fs.exists(d + "/hew")))
 }

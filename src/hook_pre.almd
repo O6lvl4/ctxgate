@@ -15,7 +15,7 @@ import value
 import process
 import self.config
 import self.tune
-import self.peekrw
+import self.hewrw
 
 // Pure: returns the updated tool_input, or none when nothing should change.
 fn rewrite(cfg: config.Config, tool: String, input: Value) -> Option[Value] = match tool {
@@ -84,8 +84,8 @@ effect fn run(cfg: config.Config, raw: String) -> Option[String] = match json.pa
     tune.observe_call(cfg, json.get_string(j, "session_id") ?? "", tool, input) ?? ()
     if tool == "Bash" then {
       let original = json.get_string(input, "command") ?? ""
-      // 1. reads of source files → peek (when peek is installed and CTXGATE_PEEK != 0)
-      let command = if cfg.peek_rw then (peekrw.rewrite_reads(original) ?? original) else original
+      // 1. reads of source files → hew (when hew is installed and CTXGATE_HEW != 0)
+      let command = if cfg.hew_rw then (hewrw.rewrite_reads(original) ?? original) else original
       // 2. the rest of the command surface → rtk
       match rtk_rewrite(cfg, command) ?? Keep {
         Keep => if command == original then none else some(envelope(value.merge(input, value.object([("command", value.str(command))])))),
@@ -106,7 +106,7 @@ fn test_cfg() -> config.Config = config.Config {
   head: 30, tail: 30, salient: 40, line_clip: 200, grep_head_limit: 60,
   outline_bin: "ctxgate-outline", outline_max: 120, max_block: 20,
   window: 200000, lvl_compress: 40, lvl_aggressive: 60, lvl_isolate: 75,
-  dedup_min: 600, diff_max_cells: 4_000_000, rtk_bin: "", peek_rw: false, redact: true, retain_days: 14, debug: false,
+  dedup_min: 600, diff_max_cells: 4_000_000, rtk_bin: "", hew_rw: false, redact: true, retain_days: 14, debug: false,
 }
 
 test "grep without head_limit gets one" {

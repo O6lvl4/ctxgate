@@ -256,7 +256,7 @@ fn test_cfg() -> config.Config = config.Config {
   head: 30, tail: 30, salient: 40, line_clip: 200, grep_head_limit: 60,
   outline_bin: "ctxgate-outline", outline_max: 120, max_block: 20,
   window: 200000, lvl_compress: 40, lvl_aggressive: 60, lvl_isolate: 75,
-  dedup_min: 600, diff_max_cells: 4_000_000, rtk_bin: "", peek_rw: false, redact: true, retain_days: 14, debug: false,
+  dedup_min: 600, diff_max_cells: 4_000_000, rtk_bin: "", hew_rw: false, redact: true, retain_days: 14, debug: false,
 }
 
 test "levels follow thresholds" {
