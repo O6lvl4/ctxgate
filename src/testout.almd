@@ -11,6 +11,7 @@ import fs
 type Runner =
   | CargoTest
   | CargoBuild
+  | Almide
   | GoTest
   | GoBuild
   | Pytest
@@ -33,6 +34,7 @@ fn detect(command: String, text: String) -> Runner = {
   else if has("vitest") then Vitest
   else if has("jest") then Jest
   else if has("tsc") then Tsc
+  else if has("almide") then Almide
   else detect_by_text(text)
 }
 
@@ -68,6 +70,7 @@ fn is_rustc_diag(l: String) -> Bool = regex.is_match("^(error|warning)(\\[[A-Z0-
 fn name(r: Runner) -> String = match r {
   CargoTest => "cargo test",
   CargoBuild => "cargo build",
+  Almide => "almide",
   GoTest => "go test",
   GoBuild => "go build",
   Pytest => "pytest",
@@ -81,6 +84,7 @@ fn name(r: Runner) -> String = match r {
 fn summarize(r: Runner, text: String, max_block: Int) -> Option[String] = match r {
   CargoTest => cargo_test(text, max_block),
   CargoBuild => cargo_build(text, max_block),
+  Almide => rustc_diags(text, max_block, "almide"),
   GoTest => go_test(text, max_block),
   GoBuild => go_build(text),
   Pytest => pytest(text, max_block),
@@ -196,8 +200,23 @@ fn cargo_test(text: String, max_block: Int) -> Option[String] = {
   some(list.join(out, "\n"))
 }
 
-// ── cargo build / check / clippy (rustc diagnostics) ──────────────────────
-fn cargo_build(text: String, max_block: Int) -> Option[String] = {
+// ── rustc-shaped diagnostics ──────────────────────────────────────────────
+//
+// `cargo build`, and also `almide`: Almide emits the same shape — `error[E002]: …`,
+// a `--> file:line:col` arrow, a caret line. The parser is right for both, which is
+// why they share it; only the name differs.
+//
+// Sharing it is not cosmetic. Without an Almide case, `almide test x.almd` reached
+// this renderer through `detect_by_text` and every summary was headed
+// `cargo build: FAILED`. That line is read by an agent writing Almide — a language
+// golemide's own docs say the model has almost certainly never seen — and telling it
+// the failure came from cargo points at the one language it must not copy.
+//
+// The text fallback still answers CargoBuild, because the two formats are
+// genuinely indistinguishable without the command. Naming the command fixes it.
+fn cargo_build(text: String, max_block: Int) -> Option[String] = rustc_diags(text, max_block, "cargo build")
+
+fn rustc_diags(text: String, max_block: Int, label: String) -> Option[String] = {
   let lines = string.lines(text)
   let is_diag_start = (l: String) => regex.is_match("^(error|warning)(\\[[A-Z0-9]+\\])?: ", l)
     and not string.starts_with(l, "error: could not compile")
@@ -214,7 +233,7 @@ fn cargo_build(text: String, max_block: Int) -> Option[String] = {
   let warnings = list.filter(diags, (d) => string.starts_with(d.title, "warning"))
   var out: List[String] = []
   let verdict = if list.is_empty(errors) then "ok" else "FAILED"
-  list.push(out, "cargo build: ${verdict} — ${int.to_string(list.len(errors))} errors, ${int.to_string(list.len(warnings))} warnings")
+  list.push(out, "${label}: ${verdict} — ${int.to_string(list.len(errors))} errors, ${int.to_string(list.len(warnings))} warnings")
   for e in list.take(errors, 8) {
     list.push(out, "── ${e.title} ──")
     for l in cap(e.body, max_block) { list.push(out, "  " + l) }
@@ -474,4 +493,27 @@ test "unknown text yields none" {
   assert(option.is_none(go_test("nothing here", 20)))
   assert(option.is_none(pytest("nothing here", 20)))
   assert(option.is_none(jest("nothing here", 20)))
+}
+
+test "almide output is named almide, not cargo" {
+  let diag = "error[E002]: undefined function 'to_roman'\n  --> roman_numerals.almd:1:27\n  in call to to_roman()\n  hint: Check the function name\n\n"
+  assert_eq(name(detect("almide test roman_numerals.almd", diag)), "almide")
+  match summarize(detect("almide test roman_numerals.almd", diag), diag, 40) {
+    none => assert(false),
+    some(s) => {
+      assert(string.contains(s, "almide: FAILED"))
+      assert_eq(string.contains(s, "cargo"), false)
+      assert(string.contains(s, "error[E002]"))
+    },
+  }
+}
+
+test "cargo keeps its own name" {
+  let diag = "error[E0308]: mismatched types\n  --> src/main.rs:3:5\n\n"
+  assert_eq(name(detect("cargo build", diag)), "cargo build")
+}
+
+test "without the command, rustc-shaped output still reads as cargo" {
+  let diag = "error[E002]: undefined function 'x'\n  --> a.almd:1:1\n\n"
+  assert_eq(name(detect("", diag)), "cargo build")
 }
