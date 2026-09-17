@@ -66,21 +66,21 @@ effect fn main() -> Unit = {
   match list.get(args, 0) ?? "help" {
     "hook" => if (list.get(args, 1) ?? "") == "codex" then {
       match codex.run(cfg, list.get(args, 2) ?? "", io.read_all()) ?? none { some(out) => println(out), none => () }
-    } else cmd_hook(cfg, list.get(args, 1) ?? ""),
-    "exec" => codex.exec_command(cfg, list.drop(args, 1)),
-    "show" => cmd_show(cfg, list.drop(args, 1)),
-    "outline" => cmd_outline(cfg, list.get(args, 1) ?? ""),
-    "summarize" => cmd_summarize(cfg, list.get(args, 1) ?? ""),
-    "path" => cmd_path(cfg, list.get(args, 1) ?? ""),
-    "list" => cmd_list(cfg, list.get(args, 1) ?? "20"),
-    "stats" => cmd_stats(cfg),
-    "status" => if list.contains(args, "--line") then cmd_status_line(cfg, "") else cmd_status(cfg),
-    "recall" => cmd_recall(cfg, list.get(args, 1) ?? "40"),
-    "report" => cmd_report(cfg),
-    "doctor" => if list.contains(args, "--codex") then codex.doctor(list.contains(args, "--global")) else cmd_doctor(cfg),
-    "statusline" => cmd_statusline(cfg),
-    "init" => if list.contains(args, "--codex") then codex.init(list.contains(args, "--global")) else cmd_init(cfg, list.contains(args, "--global")),
-    "gc" => cmd_gc(cfg, list.drop(args, 1), true),
+    } else cmd_hook(cfg, list.get(args, 1) ?? "")!,
+    "exec" => codex.exec_command(cfg, list.drop(args, 1))!,
+    "show" => cmd_show(cfg, list.drop(args, 1))!,
+    "outline" => cmd_outline(cfg, list.get(args, 1) ?? "")!,
+    "summarize" => cmd_summarize(cfg, list.get(args, 1) ?? "")!,
+    "path" => cmd_path(cfg, list.get(args, 1) ?? "")!,
+    "list" => cmd_list(cfg, list.get(args, 1) ?? "20")!,
+    "stats" => cmd_stats(cfg)!,
+    "status" => if list.contains(args, "--line") then cmd_status_line(cfg, "")! else cmd_status(cfg)!,
+    "recall" => cmd_recall(cfg, list.get(args, 1) ?? "40")!,
+    "report" => cmd_report(cfg)!,
+    "doctor" => if list.contains(args, "--codex") then codex.doctor(list.contains(args, "--global"))! else cmd_doctor(cfg)!,
+    "statusline" => cmd_statusline(cfg)!,
+    "init" => if list.contains(args, "--codex") then codex.init(list.contains(args, "--global"))! else cmd_init(cfg, list.contains(args, "--global"))!,
+    "gc" => cmd_gc(cfg, list.drop(args, 1), true)!,
     "version" | "--version" | "-V" => println("ctxgate 0.11.0"),
     _ => println(USAGE),
   }
@@ -370,7 +370,7 @@ effect fn cmd_status(cfg: config.Config) -> Unit = {
 effect fn cmd_statusline(cfg: config.Config) -> Unit = {
   let raw = io.read_all()
   match json.parse(raw) {
-    err(_) => cmd_status_line(cfg, ""),
+    err(_) => cmd_status_line(cfg, "")!,
     ok(j) => {
       let sid = json.get_string(j, "session_id") ?? ""
       let pct = match value.field(j, "context_window")? {
@@ -384,7 +384,7 @@ effect fn cmd_statusline(cfg: config.Config) -> Unit = {
         some(p) => budget.record_reported(cfg, sid, p) ?? (),
         none => (),
       }
-      cmd_status_line(cfg, sid)
+      cmd_status_line(cfg, sid)!
     },
   }
 }
