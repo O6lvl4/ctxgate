@@ -25,8 +25,11 @@ fn from_hew(o: pk.Outline) -> Toc = Toc {
 // ── entry point (effect) ──────────────────────────────────────────────────
 effect fn of_file(cfg: config.Config, path: String) -> Result[Toc, String] = {
   let provider = match env.get("HEW_OUTLINE_BIN") { some(b) => some(b), none => if cfg.outline_bin == "" then none else some(cfg.outline_bin) }
-  let lines = string.lines(fs.read_text(path)!)
-  ok(from_hew(pk.of_file_with(path, lines, provider)!))
+  let text = fs.read_text(path)!
+  let lines = string.lines(text)
+  // hew compiles a grammar per language it is handed; one file needs one engine.
+  let engines = pk.engines_for([path])
+  ok(from_hew(pk.of_file_with(engines, path, text, lines, provider)!))
 }
 
 // ── lookup / render (pure) ────────────────────────────────────────────────
