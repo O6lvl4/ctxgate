@@ -223,7 +223,7 @@ effect fn current_session(cfg: config.Config) -> Option[Value] = {
       let raw = fs.read_text_if_exists(sessions_dir(cfg) + "/" + sid + ".json")! ?? "{}"
       some(value.merge(json.parse(raw) ?? value.object([]), value.object([("session", value.str(sid))])))
     },
-    none => latest_session(cfg),
+    none => latest_session(cfg)!,
   }
 }
 
