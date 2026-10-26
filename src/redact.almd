@@ -33,17 +33,17 @@ fn redact_line(line: String) -> (String, Int) = {
   var l = line
   var n = 0
   for r in rules() {
-    if regex.is_match(r.pattern, l) then {
-      n = n + list.len(regex.find_all(r.pattern, l))
-      l = regex.replace(r.pattern, l, mask(r.kind))
+    if regex.is_match(regex.new(r.pattern), l) then {
+      n = n + list.len(regex.find_all(regex.new(r.pattern), l))
+      l = regex.replace(regex.new(r.pattern), l, mask(r.kind))
     } else ()
   }
   // assignments: keep the key, mask the value (no backreferences in almide's regex.replace,
   // so rebuild the line from the capture groups instead)
   let assign = "([A-Za-z_]*" + ASSIGN_KEYS + "[A-Za-z_]*)(\\s*[=:]\\s*[\"']?)([^\"'\\s,;]{6,})"
   var guard_n = 0
-  while guard_n < 4 and not string.contains(l, "[REDACTED:") and regex.is_match(assign, l) {
-    match regex.captures(assign, l) {
+  while guard_n < 4 and not string.contains(l, "[REDACTED:") and regex.is_match(regex.new(assign), l) {
+    match regex.captures(regex.new(assign), l) {
       some(c) => {
         let whole = list.get(c, 0) ?? ""
         let rebuilt = (list.get(c, 1) ?? "") + (list.get(c, 3) ?? "") + mask("value")

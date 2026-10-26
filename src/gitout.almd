@@ -31,7 +31,7 @@ fn detect_by_text(text: String) -> Kind = {
   let lines = string.lines(text)
   if list.any(lines, (l) => string.starts_with(l, "diff --git ")) then Diff
   else if list.any(lines, (l) => string.starts_with(l, "On branch ") or string.starts_with(l, "HEAD detached at ")) then Status
-  else if list.any(lines, (l) => regex.is_match("^commit [0-9a-f]+", l)) then Log
+  else if list.any(lines, (l) => regex.is_match(regex.new("^commit [0-9a-f]+"), l)) then Log
   else NotGit
 }
 
@@ -133,7 +133,7 @@ fn squeeze_hunk(lines: List[String], max_lines: Int) -> List[String] = {
 }
 
 // `@@ -3,7 +3,7 @@ fn f1() -> i32 { 1 }` → `@@ -3 +3 @@ fn f1() -> i32 { 1 }`
-fn short_hunk_header(h: String) -> String = match regex.captures("^@@ -([0-9]+)(,[0-9]+)? \\+([0-9]+)(,[0-9]+)? @@(.*)$", h) {
+fn short_hunk_header(h: String) -> String = match regex.captures(regex.new("^@@ -([0-9]+)(,[0-9]+)? \\+([0-9]+)(,[0-9]+)? @@(.*)$"), h) {
   some(c) => "@@ -${list.get(c, 1) ?? ""} +${list.get(c, 3) ?? ""} @@${compress.clip(list.get(c, 5) ?? "", 60)}",
   none => compress.clip(h, 80),
 }
@@ -202,7 +202,7 @@ fn status(text: String) -> Option[String] = {
   let lines = string.lines(text)
   let branch = list.find(lines, (l) => string.starts_with(l, "On branch ") or string.starts_with(l, "HEAD detached at "))
   guard option.is_some(branch) else none
-  let sync = list.find(lines, (l) => string.starts_with(l, "Your branch is ")) |> option.map((l) => string.trim(regex.replace("^Your branch is |\\.$", l, ""))) ?? ""
+  let sync = list.find(lines, (l) => string.starts_with(l, "Your branch is ")) |> option.map((l) => string.trim(regex.replace(regex.new("^Your branch is |\\.$"), l, ""))) ?? ""
 
   var section = ""
   var staged: List[String] = []
@@ -254,7 +254,7 @@ fn join_cap(xs: List[String], max: Int) -> String =
 type Commit = { sha: String, author: String, date: String, subject: String, stat: String }
 
 fn log_view(text: String) -> Option[String] = {
-  let commits = segments(string.lines(text), (l) => regex.is_match("^commit [0-9a-f]+", l)) |> list.map(parse_commit)
+  let commits = segments(string.lines(text), (l) => regex.is_match(regex.new("^commit [0-9a-f]+"), l)) |> list.map(parse_commit)
   guard not list.is_empty(commits) else none
   let shown = list.take(commits, 60)
   var out: List[String] = []
@@ -271,10 +271,10 @@ fn parse_commit(seg: List[String]) -> Commit = {
   let author_line = first((l) => string.starts_with(l, "Author: "))
   let date_line = first((l) => string.starts_with(l, "Date: "))
   let subject_line = first((l) => string.starts_with(l, "    ") and string.trim(l) != "")
-  let stat_line = first((l) => regex.is_match("^ [0-9]+ files? changed", l))
+  let stat_line = first((l) => regex.is_match(regex.new("^ [0-9]+ files? changed"), l))
   Commit {
     sha: string.take(string.drop(list.get(seg, 0) ?? "", 7), 7),
-    author: if author_line == "" then "" else string.trim(regex.replace(" <.*>$", string.drop(author_line, 8), "")),
+    author: if author_line == "" then "" else string.trim(regex.replace(regex.new(" <.*>$"), string.drop(author_line, 8), "")),
     date: if date_line == "" then "" else short_date(string.trim(string.drop(date_line, 6))),
     subject: string.trim(subject_line),
     stat: string.trim(stat_line),
@@ -284,7 +284,7 @@ fn parse_commit(seg: List[String]) -> Commit = {
 // "Sun Sep 6 09:27:58 2026 +0900" → "2026-Sep-06"; ISO dates pass through their date part.
 fn short_date(d: String) -> String = {
   let t = string.split(d, " ") |> list.filter((x) => x != "")
-  if list.len(t) >= 5 and regex.is_match("^[0-9]{4}$", list.get(t, 4) ?? "") then {
+  if list.len(t) >= 5 and regex.is_match(regex.new("^[0-9]{4}$"), list.get(t, 4) ?? "") then {
     let day = list.get(t, 2) ?? ""
     "${list.get(t, 4) ?? ""}-${list.get(t, 1) ?? ""}-${if string.len(day) == 1 then "0" + day else day}"
   } else string.take(d, 10)

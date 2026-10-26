@@ -27,28 +27,28 @@ fn store_dir(cfg: config.Config) -> String = "${cfg.home}/store"
 fn index_path(cfg: config.Config) -> String = "${cfg.home}/index.jsonl"
 fn entry_path(cfg: config.Config, id: String) -> String = "${store_dir(cfg)}/${id}.txt"
 
-fn id_of(raw: String) -> String = string.take(hash.sha256_hex(raw), ID_LEN)
+fn id_of(raw: String) -> String = string.take(hash.sha256_hex(bytes.from_string(raw)), ID_LEN)
 
 fn entry_to_value(e: Entry) -> Value = value.object([
-  ("id", value.str(e.id)),
+  ("id", value.string(e.id)),
   ("ts", value.int(e.ts)),
-  ("session", value.str(e.session)),
-  ("tool", value.str(e.tool)),
-  ("label", value.str(e.label)),
+  ("session", value.string(e.session)),
+  ("tool", value.string(e.tool)),
+  ("label", value.string(e.label)),
   ("bytes", value.int(e.bytes)),
   ("lines", value.int(e.lines)),
   ("kept", value.int(e.kept)),
 ])
 
 fn entry_from_value(v: Value) -> Entry = Entry {
-  id: json.get_string(v, "id") ?? "",
-  ts: json.get_int(v, "ts") ?? 0,
-  session: json.get_string(v, "session") ?? "",
-  tool: json.get_string(v, "tool") ?? "",
-  label: json.get_string(v, "label") ?? "",
-  bytes: json.get_int(v, "bytes") ?? 0,
-  lines: json.get_int(v, "lines") ?? 0,
-  kept: json.get_int(v, "kept") ?? 0,
+  id: value.get_string(v, "id") ?? "",
+  ts: value.get_int(v, "ts") ?? 0,
+  session: value.get_string(v, "session") ?? "",
+  tool: value.get_string(v, "tool") ?? "",
+  label: value.get_string(v, "label") ?? "",
+  bytes: value.get_int(v, "bytes") ?? 0,
+  lines: value.get_int(v, "lines") ?? 0,
+  kept: value.get_int(v, "kept") ?? 0,
 }
 
 // Store raw text; returns its id. Idempotent for identical content.
@@ -56,13 +56,13 @@ effect fn put(cfg: config.Config, raw: String) -> String = {
   fs.mkdir_p(store_dir(cfg))!
   let id = id_of(raw)
   let path = entry_path(cfg, id)
-  if fs.exists(path) then () else fs.write(path, raw)!
+  if fs.exists(path) then () else fs.write_text(path, raw)!
   id
 }
 
 effect fn record(cfg: config.Config, e: Entry) -> Unit = {
   fs.mkdir_p(cfg.home)!
-  fs.append(index_path(cfg), json.stringify(entry_to_value(e)) + "\n")!
+  fs.append_text(index_path(cfg), json.stringify(entry_to_value(e)) + "\n")!
 }
 
 effect fn get(cfg: config.Config, id: String) -> Result[String, String] = {
@@ -102,7 +102,7 @@ effect fn debug_dump(cfg: config.Config, event: String, raw: String) -> Unit = {
   if cfg.debug then {
     let dir = "${cfg.home}/debug"
     fs.mkdir_p(dir)!
-    fs.write("${dir}/${event}-${int.to_string(env.millis())}.json", raw)!
+    fs.write_text("${dir}/${event}-${int.to_string(datetime.now_ms())}.json", raw)!
   } else ()
 }
 

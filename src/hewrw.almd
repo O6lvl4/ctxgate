@@ -26,7 +26,7 @@ fn tokens(seg: String) -> List[String] = {
   var out: List[String] = []
   var cur = ""
   var q = ""
-  for ch in string.chars(seg) {
+  for ch in string.to_list(seg) {
     if q != "" then { cur = cur + ch; if ch == q then q = "" else () }
     else if ch == "'" or ch == "\"" then { cur = cur + ch; q = ch }
     else if ch == " " or ch == "\t" then { if cur != "" then { list.push(out, cur); cur = "" } else () }
@@ -54,7 +54,7 @@ fn rw_grep(ts: List[String]) -> Option[String] = {
     else if string.starts_with(t, "-") then {
       let flags = string.drop(t, 1)
       if flags == "e" then expect_pat = true
-      else if flags != "" and list.all(string.chars(flags), (c) => c == "n" or c == "r" or c == "R" or c == "E") then ()
+      else if flags != "" and list.all(string.to_list(flags), (c) => c == "n" or c == "r" or c == "R" or c == "E") then ()
       else bad = true
     }
     else if pat == "" then pat = unquote(t)
@@ -71,9 +71,9 @@ fn rw_sed(ts: List[String]) -> Option[String] = {
   let range = unquote(list.get(ts, 2) ?? "")
   let file = list.get(ts, 3) ?? ""
   guard source_like(file) else none
-  match regex.captures("^([0-9]+),([0-9]+)p$", range) {
+  match regex.captures(regex.new("^([0-9]+),([0-9]+)p$"), range) {
     some(cs) => some("hew ${file} --lines ${list.get(cs, 1) ?? ""}-${list.get(cs, 2) ?? ""}"),
-    none => match regex.captures("^([0-9]+)p$", range) {
+    none => match regex.captures(regex.new("^([0-9]+)p$"), range) {
       some(cs) => some("hew ${file} --lines ${list.get(cs, 1) ?? ""}-${list.get(cs, 1) ?? ""}"),
       none => none,
     },
@@ -90,8 +90,8 @@ fn rw_cat(ts: List[String]) -> Option[String] = {
 fn rw_headtail(ts: List[String]) -> Option[String] = {
   let cmd = list.first(ts) ?? ""
   guard cmd == "head" or cmd == "tail" else none
-  let (n, file) = if list.len(ts) == 3 and regex.is_match("^-[0-9]+$", list.get(ts, 1) ?? "") then (string.drop(list.get(ts, 1) ?? "", 1), list.get(ts, 2) ?? "")
-    else if list.len(ts) == 4 and (list.get(ts, 1) ?? "") == "-n" and regex.is_match("^[0-9]+$", list.get(ts, 2) ?? "") then (list.get(ts, 2) ?? "", list.get(ts, 3) ?? "")
+  let (n, file) = if list.len(ts) == 3 and regex.is_match(regex.new("^-[0-9]+$"), list.get(ts, 1) ?? "") then (string.drop(list.get(ts, 1) ?? "", 1), list.get(ts, 2) ?? "")
+    else if list.len(ts) == 4 and (list.get(ts, 1) ?? "") == "-n" and regex.is_match(regex.new("^[0-9]+$"), list.get(ts, 2) ?? "") then (list.get(ts, 2) ?? "", list.get(ts, 3) ?? "")
     else ("", "")
   guard n != "" and source_like(file) else none
   some("hew ${file} --${cmd} ${n}")
@@ -118,7 +118,7 @@ fn rewrite_reads(command: String) -> Option[String] = {
   var prev = ""
   let flush = (s: String) => match rw_segment(s) { some(x) => x, none => s }
   var pieces: List[String] = []
-  for ch in string.chars(command) {
+  for ch in string.to_list(command) {
     if q != "" then { seg = seg + ch; if ch == q then q = "" else () }
     else if ch == "'" or ch == "\"" then { seg = seg + ch; q = ch }
     else if ch == ";" or ch == "\n" then { list.push(pieces, seg); list.push(pieces, ch); seg = "" }

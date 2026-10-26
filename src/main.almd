@@ -52,7 +52,7 @@ env: CTXGATE_HOME, CTXGATE_MAX_BASH/READ/GREP/OTHER, CTXGATE_HEAD, CTXGATE_TAIL,
 
 effect fn main() -> Unit = {
   // env.args strips everything before any `--`, including child arguments.
-  let raw_args = list.drop(process.args(), 1)
+  let raw_args = env.args()
   let args = if (list.get(raw_args, 0) ?? "") == "--" then list.drop(raw_args, 1) else raw_args
   let base = config.load()!
   let is_codex = option.is_some(env.get("CODEX_THREAD_ID"))
@@ -61,7 +61,7 @@ effect fn main() -> Unit = {
   // Codex commands run sandboxed: ~/.ctxgate is usually not writable. Hooks and
   // wrapped commands must agree on a writable store even before the first hook.
   let cfg = if is_codex and option.is_none(env.get("CTXGATE_HOME")) then
-    config.Config { ...base, home: env.temp_dir() + "/ctxgate-codex" }
+    config.Config { ...base, home: fs.temp_dir() + "/ctxgate-codex" }
     else base
   match list.get(args, 0) ?? "help" {
     "hook" => if (list.get(args, 1) ?? "") == "codex" then {
@@ -94,7 +94,7 @@ effect fn cmd_hook(base: config.Config, which: String) -> Unit = {
   // Context Budgeter: tighten the config as the window fills; banner tells the model why.
   let (cfg0, usage) = budget.effective(base, raw) ?? (base, none)
   // self-tuning: kinds of replacement that made the model ask again are softened
-  let sid0 = match json.parse(raw) { ok(j) => json.get_string(j, "session_id") ?? "", err(_) => "" }
+  let sid0 = match json.parse(raw) { ok(j) => value.get_string(j, "session_id") ?? "", err(_) => "" }
   let cfg = tune.adjust(cfg0, sid0) ?? cfg0
   let banner = match usage {
     some(u) => budget.banner(u) ?? "",
@@ -158,9 +158,13 @@ fn slice_text(text: String, s: Slice) -> List[String] = {
     Head(k) => render(list.take(all, k)),
     Tail(k) => render(list.drop(all, int.max(0, n - k))),
     Lines(lo, hi) => render(list.filter(all, (p) => p.0 >= lo and p.0 <= hi)),
-    Grep(re) => render(list.filter(all, (p) => regex.is_match(re, p.1))),
+    Grep(re) => {
+      let rx = regex.new(re)
+      render(list.filter(all, (p) => regex.is_match(rx, p.1)))
+    },
     Around(re, ctx) => {
-      let hits = list.filter(all, (p) => regex.is_match(re, p.1)) |> list.map((p) => p.0)
+      let rx = regex.new(re)
+      let hits = list.filter(all, (p) => regex.is_match(rx, p.1)) |> list.map((p) => p.0)
       let keep = list.filter(all, (p) => list.any(hits, (h) => p.0 >= h - ctx and p.0 <= h + ctx))
       // insert a separator where the kept ranges are discontiguous
       var out: List[String] = []
@@ -245,10 +249,10 @@ effect fn cmd_stats(cfg: config.Config) -> Unit = {
 
 // ── init ──────────────────────────────────────────────────────────────────
 fn hook_entry(matcher: String, which: String) -> Value = value.object([
-  ("matcher", value.str(matcher)),
+  ("matcher", value.string(matcher)),
   ("hooks", value.array([value.object([
-    ("type", value.str("command")),
-    ("command", value.str("ctxgate hook ${which}")),
+    ("type", value.string("command")),
+    ("command", value.string("ctxgate hook ${which}")),
     ("timeout", value.int(15)),
   ])])),
 ])
@@ -256,9 +260,9 @@ fn hook_entry(matcher: String, which: String) -> Value = value.object([
 // Pure merge: replaces any existing ctxgate entries with the current ones (so re-running
 // `init` after an upgrade picks up new matchers) and leaves every other hook untouched.
 fn merge_settings(settings: Value) -> Value = {
-  let hooks = value.field(settings, "hooks") ?? value.object([])
+  let hooks = value.get(settings, "hooks") ?? value.object([])
   let set = (hs: Value, event: String, entry: Value) => {
-    let existing = json.get_array(hs, event) ?? []
+    let existing = value.get_array(hs, event) ?? []
     var next = list.filter(existing, (e) => not string.contains(json.stringify(e), "ctxgate hook"))
     list.push(next, entry)
     value.merge(hs, value.object([(event, value.array(next))]))
@@ -280,7 +284,7 @@ effect fn cmd_init(cfg: config.Config, global: Bool) -> Unit = {
   let merged = merge_settings(settings)
   let had_file = fs.exists(path)
   if had_file then fs.copy(path, "${path}.bak")! else ()
-  fs.write(path, json.stringify_pretty(merged) + "\n")!
+  fs.write_text(path, json.stringify_pretty(merged) + "\n")!
   println("ctxgate hooks written to ${path}" + (if had_file then " (backup: ${path}.bak)" else ""))
   write_claude_md(if global then "${env.get("HOME") ?? "."}/.claude/CLAUDE.md" else "${env.cwd()!}/CLAUDE.md")!
   println("vault: ${cfg.home}")
@@ -308,10 +312,10 @@ test "merge_settings is idempotent and preserves other hooks" {
   let once = merge_settings(base)
   let twice = merge_settings(once)
   assert_eq(json.stringify(once), json.stringify(twice))
-  assert_eq(json.get_string(once, "model"), some("x"))
-  let pre = json.get_array(value.field(once, "hooks")!, "PreToolUse") ?? []
+  assert_eq(value.get_string(once, "model"), some("x"))
+  let pre = value.get_array((value.as_object(once) |> result.flat_map((_) => option.to_result(value.get(once, "hooks"), "missing field 'hooks'")))!, "PreToolUse") ?? []
   assert_eq(list.len(pre), 2)
-  let post = json.get_array(value.field(once, "hooks")!, "PostToolUse") ?? []
+  let post = value.get_array((value.as_object(once) |> result.flat_map((_) => option.to_result(value.get(once, "hooks"), "missing field 'hooks'")))!, "PostToolUse") ?? []
   assert_eq(list.len(post), 1)
 }
 
@@ -344,14 +348,14 @@ effect fn cmd_status(cfg: config.Config) -> Unit = {
   match budget.current_session(cfg) ?? none {
     none => println("  no session seen yet (records appear after the first hook call)"),
     some(s) => {
-      let used = json.get_int(s, "used") ?? 0
-      let pct = json.get_int(s, "pct") ?? 0
-      let level = json.get_string(s, "level") ?? "NORMAL"
-      let sid = json.get_string(s, "session") ?? ""
+      let used = value.get_int(s, "used") ?? 0
+      let pct = value.get_int(s, "pct") ?? 0
+      let level = value.get_string(s, "level") ?? "NORMAL"
+      let sid = value.get_string(s, "session") ?? ""
       println("  session   ${sid}")
-      if option.is_some(json.get_int(s, "used")) then {
+      if option.is_some(value.get_int(s, "used")) then {
         println("  used      ${int.to_string(used / 1000)}k tokens  (${int.to_string(pct)}%)  → ${level}")
-        println("  window    ${int.to_string((json.get_int(s, "window") ?? cfg.window) / 1000)}k tokens")
+        println("  window    ${int.to_string((value.get_int(s, "window") ?? cfg.window) / 1000)}k tokens")
       } else println("  usage     unknown (base thresholds; no token_count event recorded)")
       let eff = budget.apply(cfg, budget.level_of(cfg, pct))
       println("  effective budgets  bash ${int.to_string(eff.max_bash)}  read ${int.to_string(eff.max_read)}  grep ${int.to_string(eff.max_grep)}  head/tail ${int.to_string(eff.head)}/${int.to_string(eff.tail)}  outline ${int.to_string(eff.outline_max)}")
@@ -372,11 +376,11 @@ effect fn cmd_statusline(cfg: config.Config) -> Unit = {
   match json.parse(raw) {
     err(_) => cmd_status_line(cfg, "")!,
     ok(j) => {
-      let sid = json.get_string(j, "session_id") ?? ""
-      let pct = match value.field(j, "context_window")? {
-        some(cw) => match json.get_float(cw, "used_percentage") {
-          some(f) => some(float.to_int(f)),
-          none => json.get_int(cw, "used_percentage"),
+      let sid = value.get_string(j, "session_id") ?? ""
+      let pct = match value.get(j, "context_window") {
+        some(cw) => match value.get_float(cw, "used_percentage") {
+          some(f) => some(int.from_saturating(f)),
+          none => value.get_int(cw, "used_percentage"),
         },
         none => none,
       }
@@ -395,10 +399,10 @@ effect fn cmd_status_line(cfg: config.Config, sid_hint: String) -> Unit = {
     some(v) => v,
     none => value.object([]),
   }
-  let sid = if sid_hint != "" then sid_hint else json.get_string(s, "session") ?? ""
+  let sid = if sid_hint != "" then sid_hint else value.get_string(s, "session") ?? ""
   let pct = match budget.reported_pct(cfg, sid) ?? none {
     some(p) => p,
-    none => json.get_int(s, "pct") ?? 0,
+    none => value.get_int(s, "pct") ?? 0,
   }
   let level = budget.level_name(budget.level_of(cfg, pct))
   let es = vault.entries(cfg)! |> list.filter((e) => e.session == sid)
@@ -412,8 +416,8 @@ effect fn cmd_status_line(cfg: config.Config, sid_hint: String) -> Unit = {
 // session's vault entries: enough to know what exists and how to fetch it, nothing more.
 effect fn session_digest(cfg: config.Config, raw: String) -> Option[String] = {
   let j = json.parse(raw) ?? value.object([])
-  let sid = json.get_string(j, "session_id") ?? ""
-  let source = json.get_string(j, "source") ?? ""
+  let sid = value.get_string(j, "session_id") ?? ""
+  let source = value.get_string(j, "source") ?? ""
   guard sid != "" and (source == "compact" or source == "resume") else none
   journal.recall(cfg, sid, 30)!
 }
@@ -422,8 +426,8 @@ effect fn session_digest(cfg: config.Config, raw: String) -> Option[String] = {
 // memory so nothing is reported as "unchanged since you saw it", and mark the journal.
 effect fn on_compact(cfg: config.Config, raw: String) -> Unit = {
   let j = json.parse(raw) ?? value.object([])
-  let sid = json.get_string(j, "session_id") ?? ""
-  let ev = json.get_string(j, "hook_event_name") ?? "compact"
+  let sid = value.get_string(j, "session_id") ?? ""
+  let ev = value.get_string(j, "hook_event_name") ?? "compact"
   guard sid != "" else ()
   dedup.forget_session(cfg, sid)!
   journal.mark(cfg, sid, ev)!
@@ -432,7 +436,7 @@ effect fn on_compact(cfg: config.Config, raw: String) -> Unit = {
 effect fn cmd_recall(cfg: config.Config, n_str: String) -> Unit = {
   let n = int.parse(n_str) ?? 40
   let sid = match budget.current_session(cfg) ?? none {
-    some(s) => json.get_string(s, "session") ?? "",
+    some(s) => value.get_string(s, "session") ?? "",
     none => "",
   }
   match journal.recall(cfg, sid, n)! {
@@ -452,15 +456,15 @@ effect fn cmd_gc(cfg: config.Config, args: List[String], verbose: Bool) -> Unit 
   }
   let dry = list.contains(args, "--dry-run")
   guard days > 0 else { if verbose then println("gc: retention disabled (days = 0)") else () }
-  let cutoff = env.unix_timestamp() - days * 86400
+  let cutoff = datetime.now() - days * 86400
   var dropped: List[String] = []
   var freed = 0
   let store = vault.store_dir(cfg)
   for n in (fs.list_dir(store) ?? []) {
     let p = "${store}/${n}"
-    let old = (fs.modified_at(p) ?? cutoff + 1) < cutoff
+    let old = ((fs.stat(p) |> result.map((s) => s.modified)) ?? cutoff + 1) < cutoff
     if old and string.ends_with(n, ".txt") then {
-      freed = freed + (fs.file_size(p) ?? 0)
+      freed = freed + ((fs.stat(p) |> result.map((s) => s.size)) ?? 0)
       list.push(dropped, string.slice(n, 0, string.len(n) - 4))
       if dry then () else fs.remove(p) ?? ()
     } else ()
@@ -469,7 +473,7 @@ effect fn cmd_gc(cfg: config.Config, args: List[String], verbose: Bool) -> Unit 
   var dropped_sessions = 0
   for n in (fs.list_dir(sessions) ?? []) {
     let p = "${sessions}/${n}"
-    if (fs.modified_at(p) ?? cutoff + 1) < cutoff then {
+    if ((fs.stat(p) |> result.map((s) => s.modified)) ?? cutoff + 1) < cutoff then {
       dropped_sessions = dropped_sessions + 1
       if dry then () else fs.remove(p) ?? ()
     } else ()
@@ -477,7 +481,7 @@ effect fn cmd_gc(cfg: config.Config, args: List[String], verbose: Bool) -> Unit 
   if not dry and not list.is_empty(dropped) then {
     let kept = vault.entries(cfg)! |> list.filter((e) => not list.contains(dropped, e.id))
     let lines = list.map(kept, (e) => json.stringify(vault.entry_to_value(e)))
-    fs.write(vault.index_path(cfg), list.join(lines, "\n") + (if list.is_empty(lines) then "" else "\n"))!
+    fs.write_text(vault.index_path(cfg), list.join(lines, "\n") + (if list.is_empty(lines) then "" else "\n"))!
   } else ()
   if verbose then println("gc${if dry then " (dry run)" else ""}: ${int.to_string(list.len(dropped))} vault entries (${compress.human_bytes(freed)}) and ${int.to_string(dropped_sessions)} session records older than ${int.to_string(days)} days") else ()
 }
@@ -486,10 +490,10 @@ effect fn cmd_gc(cfg: config.Config, args: List[String], verbose: Bool) -> Unit 
 effect fn auto_gc(cfg: config.Config) -> Unit = {
   guard cfg.retain_days > 0 else ()
   let marker = "${cfg.home}/.last_gc"
-  let last = fs.modified_at(marker) ?? 0
-  guard env.unix_timestamp() - last > 86400 else ()
+  let last = (fs.stat(marker) |> result.map((s) => s.modified)) ?? 0
+  guard datetime.now() - last > 86400 else ()
   fs.mkdir_p(cfg.home)!
-  fs.write(marker, int.to_string(env.unix_timestamp()))!
+  fs.write_text(marker, int.to_string(datetime.now()))!
   cmd_gc(cfg, [], false)!
 }
 
@@ -523,7 +527,7 @@ effect fn write_claude_md(path: String) -> Unit = {
     _ => (if current == "" then "" else string.trim(current) + "\n\n") + block + "\n",
   }
   if next == current then () else {
-    fs.write(path, next)!
+    fs.write_text(path, next)!
     println("ctxgate note written to ${path}")
   }
 }
@@ -531,7 +535,7 @@ effect fn write_claude_md(path: String) -> Unit = {
 // ── report ────────────────────────────────────────────────────────────────
 effect fn cmd_report(cfg: config.Config) -> Unit = {
   let (sid, transcript) = match budget.current_session(cfg) ?? none {
-    some(s) => (json.get_string(s, "session") ?? "", json.get_string(s, "transcript") ?? ""),
+    some(s) => (value.get_string(s, "session") ?? "", value.get_string(s, "transcript") ?? ""),
     none => ("", ""),
   }
   guard sid != "" else println("(no session yet)")
@@ -559,9 +563,9 @@ effect fn cmd_report(cfg: config.Config) -> Unit = {
 effect fn cmd_doctor(cfg: config.Config) -> Unit = {
   let say = (label: String, good: Bool, detail: String) => println("  ${if good then "✓" else "✗"} ${label}${if detail == "" then "" else "  — " + detail}")
   println("ctxgate doctor")
-  let outline_ok = match process.exec_status_timeout(cfg.outline_bin, ["--help"], 3000) { ok(_) => true, err(_) => false }
+  let outline_ok = match process.output(process.ProcessCommand { cmd: cfg.outline_bin, args: ["--help"], timeout_ms: 3000 }) { ok(_) => true, err(_) => false }
   say("outline helper (${cfg.outline_bin})", outline_ok, if outline_ok then "" else "Read outlines fall back to head/tail; build tools/ctxgate-outline")
-  let rtk_ok = cfg.rtk_bin != "" and (match process.exec_status_timeout(cfg.rtk_bin, ["--version"], 3000) { ok(st) => st.code == 0, err(_) => false })
+  let rtk_ok = cfg.rtk_bin != "" and (match process.output(process.ProcessCommand { cmd: cfg.rtk_bin, args: ["--version"], timeout_ms: 3000 }) { ok(st) => st.code == 0, err(_) => false })
   say("rtk (${if cfg.rtk_bin == "" then "disabled" else cfg.rtk_bin})", rtk_ok or cfg.rtk_bin == "", if rtk_ok or cfg.rtk_bin == "" then "" else "optional; brew install rtk for the Bash command layer")
   let cwd = env.cwd() ?? "."
   let home_dir = env.get("HOME") ?? "."
@@ -578,7 +582,7 @@ effect fn cmd_doctor(cfg: config.Config) -> Unit = {
   let note_ok = string.contains(md, "ctxgate:begin") or string.contains(md_g, "ctxgate:begin")
   say("CLAUDE.md note", note_ok, if note_ok then "" else "the model does not know about `ctxgate show`; run ctxgate init")
   let probe = "${cfg.home}/.doctor"
-  let vault_ok = match fs.mkdir_p(cfg.home) { ok(_) => (match fs.write(probe, "ok") { ok(_) => true, err(_) => false }), err(_) => false }
+  let vault_ok = match fs.mkdir_p(cfg.home) { ok(_) => (match fs.write_text(probe, "ok") { ok(_) => true, err(_) => false }), err(_) => false }
   if vault_ok then fs.remove(probe) ?? () else ()
   say("vault writable (${cfg.home})", vault_ok, "")
   let sl = match fs.read_text_if_exists("${home_dir}/.claude/statusline.sh") { ok(some(t)) => t, _ => "" }

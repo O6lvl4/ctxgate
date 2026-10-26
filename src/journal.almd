@@ -26,13 +26,13 @@ fn hhmm(ts: Int) -> String = {
 effect fn append(cfg: config.Config, sid: String, line: String) -> Unit = {
   guard sid != "" else ()
   fs.mkdir_p("${cfg.home}/sessions")!
-  fs.append(path(cfg, sid), "${hhmm(env.unix_timestamp())}  ${line}\n")!
+  fs.append_text(path(cfg, sid), "${hhmm(datetime.now())}  ${line}\n")!
 }
 
 effect fn mark(cfg: config.Config, sid: String, what: String) -> Unit = {
   guard sid != "" else ()
   fs.mkdir_p("${cfg.home}/sessions")!
-  fs.append(path(cfg, sid), "── ${what} ──\n")!
+  fs.append_text(path(cfg, sid), "── ${what} ──\n")!
 }
 
 effect fn tail(cfg: config.Config, sid: String, n: Int) -> List[String] = {
@@ -49,7 +49,7 @@ effect fn tail(cfg: config.Config, sid: String, n: Int) -> List[String] = {
 fn summary_line(tool: String, label: String, id: String, rendered: String, bytes: Int) -> String = {
   let body = string.lines(rendered)
     |> list.filter((l) => l != "" and not string.starts_with(l, "[ctxgate]") and not string.starts_with(l, "  ") and not string.starts_with(l, "──")
-      and not regex.is_match("^ *[0-9]+│", l) and not string.contains(l, "⋮"))
+      and not regex.is_match(regex.new("^ *[0-9]+│"), l) and not string.contains(l, "⋮"))
   let gist = match list.first(body) {
     some(l) => compress.clip(string.trim(l), 110),
     none => "${compress.human_bytes(bytes)} vaulted",

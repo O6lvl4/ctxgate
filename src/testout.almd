@@ -51,21 +51,21 @@ fn detect_by_text(text: String) -> Runner = {
   else if string.contains(text, " Test Files ") then Vitest
   else if any((l) => string.starts_with(string.trim(l), "--- FAIL: ") or string.starts_with(string.trim(l), "--- PASS: ") or is_go_package_line(l)) then GoTest
   else if any((l) => is_pytest_summary(l)) then Pytest
-  else if regex.is_match("error TS[0-9]+:", text) then Tsc
+  else if regex.is_match(regex.new("error TS[0-9]+:"), text) then Tsc
   else if any((l) => is_rustc_diag(l)) and string.contains(text, "-->") then CargoBuild
-  else if any((l) => regex.is_match("^\\S+\\.go:[0-9]+:[0-9]+: ", l)) then GoBuild
+  else if any((l) => regex.is_match(regex.new("^\\S+\\.go:[0-9]+:[0-9]+: "), l)) then GoBuild
   else NoRunner
 }
 
 // `ok  	pkg	0.012s`, `FAIL	pkg	0.5s`, `FAIL	pkg [build failed]` — a package
 // line carries a duration or a bracketed reason. jest's `FAIL ./x.spec.js` has neither.
-fn is_go_package_line(l: String) -> Bool = regex.is_match("^(ok|FAIL)\\s+\\S+\\s+(\\[|[0-9.]+s)", l)
+fn is_go_package_line(l: String) -> Bool = regex.is_match(regex.new("^(ok|FAIL)\\s+\\S+\\s+(\\[|[0-9.]+s)"), l)
 
 fn is_pytest_summary(l: String) -> Bool =
-  string.starts_with(l, "===") and regex.is_match(" in [0-9.]+s", l)
+  string.starts_with(l, "===") and regex.is_match(regex.new(" in [0-9.]+s"), l)
     and (string.contains(l, "passed") or string.contains(l, "failed") or string.contains(l, "error") or string.contains(l, "skipped") or string.contains(l, "no tests ran"))
 
-fn is_rustc_diag(l: String) -> Bool = regex.is_match("^(error|warning)(\\[[A-Z0-9]+\\])?: ", l)
+fn is_rustc_diag(l: String) -> Bool = regex.is_match(regex.new("^(error|warning)(\\[[A-Z0-9]+\\])?: "), l)
 
 fn name(r: Runner) -> String = match r {
   CargoTest => "cargo test",
@@ -164,13 +164,13 @@ fn cargo_test(text: String, max_block: Int) -> Option[String] = {
   var failed = 0
   var ignored = 0
   for r in results {
-    let c = regex.captures("([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored", r)
+    let c = regex.captures(regex.new("([0-9]+) passed; ([0-9]+) failed; ([0-9]+) ignored"), r)
     passed = passed + grp_int(c, 1)
     failed = failed + grp_int(c, 2)
     ignored = ignored + grp_int(c, 3)
   }
   let failed_names = lines
-    |> list.filter_map((l) => match regex.captures("^test (\\S+) \\.\\.\\. FAILED$", l) {
+    |> list.filter_map((l) => match regex.captures(regex.new("^test (\\S+) \\.\\.\\. FAILED$"), l) {
       some(c) => list.get(c, 1),
       none => none,
     })
@@ -218,10 +218,10 @@ fn cargo_build(text: String, max_block: Int) -> Option[String] = rustc_diags(tex
 
 fn rustc_diags(text: String, max_block: Int, label: String) -> Option[String] = {
   let lines = string.lines(text)
-  let is_diag_start = (l: String) => regex.is_match("^(error|warning)(\\[[A-Z0-9]+\\])?: ", l)
+  let is_diag_start = (l: String) => regex.is_match(regex.new("^(error|warning)(\\[[A-Z0-9]+\\])?: "), l)
     and not string.starts_with(l, "error: could not compile")
     and not string.starts_with(l, "error: aborting")
-    and not regex.is_match("^warning: `.*` \\(.*\\) generated ", l)
+    and not regex.is_match(regex.new("^warning: `.*` \\(.*\\) generated "), l)
     and not string.starts_with(l, "warning: build failed")
   let diags = stanzas(lines,
     (l) => if is_diag_start(l) then some(l) else none,
@@ -253,25 +253,25 @@ fn rustc_diags(text: String, max_block: Int, label: String) -> Option[String] = 
 // ── go test ───────────────────────────────────────────────────────────────
 fn go_test(text: String, max_block: Int) -> Option[String] = {
   let lines = string.lines(text)
-  let pkg_ok = list.count(lines, (l) => regex.is_match("^ok\\s+\\S+", l))
-  let pkg_fail = list.filter(lines, (l) => regex.is_match("^FAIL\\s+\\S+", l))
-  let pkg_none = list.count(lines, (l) => regex.is_match("^\\?\\s+\\S+.*\\[no test files\\]", l))
-  let fails = list.filter_map(lines, (l) => match regex.captures("^\\s*--- FAIL: (\\S+)", l) {
+  let pkg_ok = list.count(lines, (l) => regex.is_match(regex.new("^ok\\s+\\S+"), l))
+  let pkg_fail = list.filter(lines, (l) => regex.is_match(regex.new("^FAIL\\s+\\S+"), l))
+  let pkg_none = list.count(lines, (l) => regex.is_match(regex.new("^\\?\\s+\\S+.*\\[no test files\\]"), l))
+  let fails = list.filter_map(lines, (l) => match regex.captures(regex.new("^\\s*--- FAIL: (\\S+)"), l) {
     some(c) => list.get(c, 1),
     none => none,
   })
-  let passes = list.count(lines, (l) => regex.is_match("^\\s*--- PASS: ", l))
-  let build_errs = list.filter(lines, (l) => regex.is_match("^\\S+\\.go:[0-9]+:[0-9]+: ", l))
+  let passes = list.count(lines, (l) => regex.is_match(regex.new("^\\s*--- PASS: "), l))
+  let build_errs = list.filter(lines, (l) => regex.is_match(regex.new("^\\S+\\.go:[0-9]+:[0-9]+: "), l))
   guard pkg_ok + list.len(pkg_fail) + pkg_none > 0 or not list.is_empty(fails) or not list.is_empty(build_errs) else none
 
   let noise_frame = (l: String) => string.contains(l, "/testing/testing.go:") or string.contains(l, "/runtime/panic.go:")
     or string.contains(l, "/runtime/") and string.contains(l, ".go:")
   let stanza_list = stanzas(lines,
-    (l) => match regex.captures("^\\s*--- FAIL: (\\S+)", l) {
+    (l) => match regex.captures(regex.new("^\\s*--- FAIL: (\\S+)"), l) {
       some(c) => list.get(c, 1),
       none => none,
     },
-    (l) => regex.is_match("^\\s*(--- PASS|=== RUN|ok\\s|FAIL\\s|FAIL$|PASS$)", l))
+    (l) => regex.is_match(regex.new("^\\s*(--- PASS|=== RUN|ok\\s|FAIL\\s|FAIL$|PASS$)"), l))
     |> list.map((s) => Stanza { title: s.title, body: drop_go_frames(s.body, noise_frame) })
 
   var out: List[String] = []
@@ -305,7 +305,7 @@ fn drop_go_frames(body: List[String], noise: fn(String) -> Bool) -> List[String]
       has_pending = false
     } else {
       if has_pending then list.push(out, pending) else ()
-      if regex.is_match("^[A-Za-z_][A-Za-z0-9_./()*]*\\(", l) and not string.starts_with(l, "panic(") then {
+      if regex.is_match(regex.new("^[A-Za-z_][A-Za-z0-9_./()*]*\\("), l) and not string.starts_with(l, "panic(") then {
         pending = l
         has_pending = true
       } else if string.starts_with(l, "panic(") or string.starts_with(l, "goroutine ") or string.starts_with(l, "created by ") or string.starts_with(l, "\t") then {
@@ -323,7 +323,7 @@ fn drop_go_frames(body: List[String], noise: fn(String) -> Bool) -> List[String]
 // ── go build / vet ────────────────────────────────────────────────────────
 fn go_build(text: String) -> Option[String] = {
   let lines = string.lines(text)
-  let errs = list.filter(lines, (l) => regex.is_match("^\\S+\\.go:[0-9]+:[0-9]+: ", l) or string.starts_with(l, "# "))
+  let errs = list.filter(lines, (l) => regex.is_match(regex.new("^\\S+\\.go:[0-9]+:[0-9]+: "), l) or string.starts_with(l, "# "))
   guard not list.is_empty(errs) else none
   let n = list.count(errs, (l) => not string.starts_with(l, "# "))
   some(list.join(["go build: FAILED — ${int.to_string(n)} diagnostics"] + cap(errs, 40), "\n"))
@@ -334,15 +334,15 @@ fn pytest(text: String, max_block: Int) -> Option[String] = {
   let lines = string.lines(text)
   let summary = list.find(lines, (l) => is_pytest_summary(l))
   guard option.is_some(summary) else none
-  let s = regex.replace("^=+ *| *=+$", summary ?? "", "")
-  let failed = list.filter_map(lines, (l) => match regex.captures("^(FAILED|ERROR) (\\S+)", l) {
+  let s = regex.replace(regex.new("^=+ *| *=+$"), summary ?? "", "")
+  let failed = list.filter_map(lines, (l) => match regex.captures(regex.new("^(FAILED|ERROR) (\\S+)"), l) {
     some(c) => list.get(c, 2),
     none => none,
   })
   let stanza_list = stanzas(lines,
     (l) => if string.starts_with(l, "___") and string.ends_with(l, "___") and string.contains(l, " ")
-      then some(string.trim(regex.replace("^_+ *| *_+$", l, ""))) else none,
-    (l) => regex.is_match("^={3,} ", l))
+      then some(string.trim(regex.replace(regex.new("^_+ *| *_+$"), l, ""))) else none,
+    (l) => regex.is_match(regex.new("^={3,} "), l))
     |> list.map((st) => Stanza { title: st.title, body: pytest_keep(st.body) })
   var out: List[String] = []
   list.push(out, "pytest: ${s}")
@@ -357,20 +357,20 @@ fn pytest(text: String, max_block: Int) -> Option[String] = {
 // Inside a pytest failure keep the assertion (`E   …`), the failing source line (`>   …`),
 // and the location (`path:N: Error`); drop the re-printed function body.
 fn pytest_keep(body: List[String]) -> List[String] =
-  list.filter(body, (l) => string.starts_with(l, "E ") or string.starts_with(l, ">") or regex.is_match("^\\S+\\.py:[0-9]+: ", l) or string.starts_with(l, "    def ") or string.starts_with(l, "def "))
+  list.filter(body, (l) => string.starts_with(l, "E ") or string.starts_with(l, ">") or regex.is_match(regex.new("^\\S+\\.py:[0-9]+: "), l) or string.starts_with(l, "    def ") or string.starts_with(l, "def "))
 
 // ── vitest ────────────────────────────────────────────────────────────────
 fn vitest(text: String, max_block: Int) -> Option[String] = {
   let lines = string.lines(text)
   let files = list.find(lines, (l) => string.contains(l, "Test Files "))
-  let tests = list.find(lines, (l) => regex.is_match("^\\s*Tests\\s+[0-9]", l))
+  let tests = list.find(lines, (l) => regex.is_match(regex.new("^\\s*Tests\\s+[0-9]"), l))
   guard option.is_some(files) or option.is_some(tests) else none
   let stanza_list = stanzas(lines,
-    (l) => match regex.captures("^\\s*FAIL\\s+(.+)$", l) {
+    (l) => match regex.captures(regex.new("^\\s*FAIL\\s+(.+)$"), l) {
       some(c) => if string.contains(grp(some(c), 1), " > ") or string.contains(grp(some(c), 1), ".") then list.get(c, 1) else none,
       none => none,
     },
-    (l) => regex.is_match("^\\s*(⎯{3,}|Test Files |✓ |× |✗ )", l))
+    (l) => regex.is_match(regex.new("^\\s*(⎯{3,}|Test Files |✓ |× |✗ )"), l))
     |> list.map((st) => Stanza { title: st.title, body: js_keep(st.body) })
   var out: List[String] = []
   list.push(out, "vitest: ${string.trim(tests ?? "")}; ${string.trim(files ?? "")}")
@@ -385,7 +385,7 @@ fn jest(text: String, max_block: Int) -> Option[String] = {
   let suites = list.find(lines, (l) => string.starts_with(string.trim(l), "Test Suites:"))
   guard option.is_some(tests) else none
   let stanza_list = stanzas(lines,
-    (l) => match regex.captures("^\\s*● (.+)$", l) {
+    (l) => match regex.captures(regex.new("^\\s*● (.+)$"), l) {
       some(c) => list.get(c, 1),
       none => none,
     },
@@ -408,8 +408,8 @@ fn js_keep(body: List[String]) -> List[String] =
 // ── tsc ───────────────────────────────────────────────────────────────────
 fn tsc(text: String) -> Option[String] = {
   let lines = string.lines(text)
-  let errs = list.filter(lines, (l) => regex.is_match("error TS[0-9]+:", l))
-  let found = list.find(lines, (l) => regex.is_match("^Found [0-9]+ error", l))
+  let errs = list.filter(lines, (l) => regex.is_match(regex.new("error TS[0-9]+:"), l))
+  let found = list.find(lines, (l) => regex.is_match(regex.new("^Found [0-9]+ error"), l))
   guard not list.is_empty(errs) or option.is_some(found) else none
   let head = if list.is_empty(errs) then "tsc: ok" else "tsc: FAILED — ${int.to_string(list.len(errs))} errors"
   some(list.join([head] + cap(list.map(errs, (l) => "  " + string.trim(l)), 40), "\n"))

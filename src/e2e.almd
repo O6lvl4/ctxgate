@@ -20,7 +20,7 @@ fn cfg_in(home: String) -> config.Config = config.Config {
 }
 
 effect fn fresh_home(tag: String) -> String = {
-  let dir = "${env.temp_dir()}/ctxgate-e2e-${tag}-${int.to_string(env.millis())}"
+  let dir = "${fs.temp_dir()}/ctxgate-e2e-${tag}-${int.to_string(datetime.now_ms())}"
   fs.mkdir_p(dir)!
   dir
 }
@@ -37,8 +37,8 @@ fn shown(out: Option[String], path: List[String]) -> String = match out {
   some(s) => match json.parse(s) {
     err(_) => "",
     ok(j) => {
-      let p = list.fold(path, json.field(json.root(), "hookSpecificOutput"), (acc, k) => json.field(acc, k))
-      match json.get_path(j, p) {
+      let p = list.fold(path, value.key(value.root(), "hookSpecificOutput"), (acc, k) => value.key(acc, k))
+      match value.get_path(j, p) {
         some(v) => match value.as_string(v) {
           ok(t) => t,
           err(_) => (value.as_array(v) ?? []) |> list.filter_map((x) => value.as_string(x)?) |> list.join("\n"),
@@ -63,9 +63,9 @@ test "persisted bash: full file missing → prefix summarised, envelope shape in
   assert(string.len(stdout) < 2000)   // Claude Code shows only the first 2 KB of a persisted output
   // sibling fields survive
   let j = json.parse(out ?? "")!
-  let upd = json.get_path(j, json.field(json.field(json.root(), "hookSpecificOutput"), "updatedToolOutput")) ?? value.null()
-  assert_eq(json.get_bool(upd, "interrupted"), some(false))
-  assert(option.is_some(json.get_string(upd, "persistedOutputPath")))
+  let upd = value.get_path(j, value.key(value.key(value.root(), "hookSpecificOutput"), "updatedToolOutput")) ?? value.null()
+  assert_eq(value.get_bool(upd, "interrupted"), some(false))
+  assert(option.is_some(value.get_string(upd, "persistedOutputPath")))
   assert(string.contains(raw, "\"tool_use_id\""))
 }
 

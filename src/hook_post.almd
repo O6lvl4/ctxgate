@@ -38,22 +38,22 @@ type Shape =
 
 // Which key holds the big text, and the text itself.
 fn extract(resp: Value) -> (Shape, String) = {
-  match json.get_string(resp, "stdout") {
+  match value.get_string(resp, "stdout") {
     some(s) => (Stdout, s),
-    none => match value.field(resp, "file")? {
-      some(f) => match json.get_string(f, "content") {
+    none => match value.get(resp, "file") {
+      some(f) => match value.get_string(f, "content") {
         some(s) => (FileContent, s),
         none => (Unknown, ""),
       },
-      none => match json.get_string(resp, "content") {
+      none => match value.get_string(resp, "content") {
         some(s) => (Content, s),
-        none => match json.get_string(resp, "text") {
+        none => match value.get_string(resp, "text") {
           some(s) => (Text, s),
-          none => match json.get_string(resp, "output") {
+          none => match value.get_string(resp, "output") {
             some(s) => (Output, s),
-            none => match json.get_array(resp, "content") {
+            none => match value.get_array(resp, "content") {
               some(items) => (McpArray, mcp_text(items)),
-              none => match json.get_array(resp, "filenames") {
+              none => match value.get_array(resp, "filenames") {
                 // Glob: Claude Code shows the model `filenames` joined by newlines
                 some(names) => (Filenames, names |> list.filter_map((n) => value.as_string(n)?) |> list.join("\n")),
                 none => (Unknown, ""),
@@ -67,43 +67,42 @@ fn extract(resp: Value) -> (Shape, String) = {
 }
 
 fn mcp_text(items: List[Value]) -> String = items
-  |> list.filter_map((it) => if (json.get_string(it, "type") ?? "") == "text" then json.get_string(it, "text") else none)
+  |> list.filter_map((it) => if (value.get_string(it, "type") ?? "") == "text" then value.get_string(it, "text") else none)
   |> list.join("\n\n")
 
 // Put `replacement` back where the text came from.
 fn replace(resp: Value, shape: Shape, replacement: String) -> Result[Value, String] = {
-  let r = value.str(replacement)
+  let r = value.string(replacement)
   match shape {
-    Stdout => json.set_path(resp, json.field(json.root(), "stdout"), r),
-    FileContent => json.set_path(resp, json.field(json.field(json.root(), "file"), "content"), r),
-    Content => json.set_path(resp, json.field(json.root(), "content"), r),
-    Text => json.set_path(resp, json.field(json.root(), "text"), r),
-    Output => json.set_path(resp, json.field(json.root(), "output"), r),
+    Stdout => value.set_path(resp, value.key(value.root(), "stdout"), r),
+    FileContent => value.set_path(resp, value.key(value.key(value.root(), "file"), "content"), r),
+    Content => value.set_path(resp, value.key(value.root(), "content"), r),
+    Text => value.set_path(resp, value.key(value.root(), "text"), r),
+    Output => value.set_path(resp, value.key(value.root(), "output"), r),
     McpArray => {
-      let items = json.get_array(resp, "content") ?? []
-      let non_text = list.filter(items, (it) => (json.get_string(it, "type") ?? "") != "text")
+      let items = value.get_array(resp, "content") ?? []
+      let non_text = list.filter(items, (it) => (value.get_string(it, "type") ?? "") != "text")
       var rebuilt = list.map(non_text, (it) => it)
-      list.push(rebuilt, value.object([("type", value.str("text")), ("text", r)]))
-      json.set_path(resp, json.field(json.root(), "content"), value.array(rebuilt))
+      list.push(rebuilt, value.object([("type", value.string("text")), ("text", r)]))
+      value.set_path(resp, value.key(value.root(), "content"), value.array(rebuilt))
     },
-    Filenames => json.set_path(resp, json.field(json.root(), "filenames"),
-      value.array(string.lines(replacement) |> list.map((l) => value.str(l)))),
+    Filenames => value.set_path(resp, value.key(value.root(), "filenames"), value.array(string.lines(replacement) |> list.map((l) => value.string(l)))),
     Unknown => err("unknown response shape"),
   }
 }
 
 // A short human label for the call: the command, file path, or pattern.
 fn label_of(tool: String, input: Value) -> String = match tool {
-  "Bash" => json.get_string(input, "command") ?? "",
-  "Read" => json.get_string(input, "file_path") ?? "",
-  "Grep" => "grep ${json.get_string(input, "pattern") ?? ""} ${json.get_string(input, "path") ?? ""}",
-  "Glob" => "glob ${json.get_string(input, "pattern") ?? ""}",
+  "Bash" => value.get_string(input, "command") ?? "",
+  "Read" => value.get_string(input, "file_path") ?? "",
+  "Grep" => "grep ${value.get_string(input, "pattern") ?? ""} ${value.get_string(input, "path") ?? ""}",
+  "Glob" => "glob ${value.get_string(input, "pattern") ?? ""}",
   _ => string.take(json.stringify(input), 120),
 }
 
 fn envelope(updated: Value) -> String = json.stringify(value.object([
   ("hookSpecificOutput", value.object([
-    ("hookEventName", value.str("PostToolUse")),
+    ("hookEventName", value.string("PostToolUse")),
     ("updatedToolOutput", updated),
   ])),
 ]))
@@ -112,19 +111,19 @@ fn envelope(updated: Value) -> String = json.stringify(value.object([
 effect fn run(cfg: config.Config, raw: String, banner: String) -> Option[String] = match json.parse(raw) {
   err(_) => none,
   ok(j) => {
-    let tool = json.get_string(j, "tool_name") ?? ""
-    let input = value.field(j, "tool_input") ?? value.object([])
-    let resp = value.field(j, "tool_response") ?? value.null()
+    let tool = value.get_string(j, "tool_name") ?? ""
+    let input = value.get(j, "tool_input") ?? value.object([])
+    let resp = value.get(j, "tool_response") ?? value.null()
     let (shape, raw_text) = extract(resp)
     guard raw_text != "" else none
     // Secrets are the one thing deliberately not preserved: masked before vault, dedup, model.
     let (text, redacted) = if cfg.redact then redact.redact(raw_text) else (raw_text, 0)
     let label = label_of(tool, input)
-    let sid = json.get_string(j, "session_id") ?? ""
+    let sid = value.get_string(j, "session_id") ?? ""
     // A paged Read (offset/limit) is the model asking for exactly that slice — it must come
     // back as asked: no dedup against another page, no outline. (Bench finding: mangling pages
     // costs extra turns, and every extra turn re-sends the whole context.)
-    let paged = tool == "Read" and (option.is_some(json.get_int(input, "offset")) or option.is_some(json.get_int(input, "limit")))
+    let paged = tool == "Read" and (option.is_some(value.get_int(input, "offset")) or option.is_some(value.get_int(input, "limit")))
     // Session dedup first: a repeat costs one line, a re-read after an edit costs the diff.
     let (seen_id, verdict) = if paged then (vault.put(cfg, text) ?? "", dedup.Fresh) else dedup.check(cfg, sid, tool, label, text) ?? ("", dedup.Fresh)
     let short = match verdict {
@@ -142,7 +141,7 @@ effect fn run(cfg: config.Config, raw: String, banner: String) -> Option[String]
       some(view) => match replace(resp, shape, if banner2 == "" then view else banner2 + "\n" + view) {
         ok(updated) => {
           vault.record(cfg, vault.Entry {
-            id: seen_id, ts: env.unix_timestamp(), session: sid, tool: tool, label: label,
+            id: seen_id, ts: datetime.now(), session: sid, tool: tool, label: label,
             bytes: string.len(text), lines: compress.line_count(text), kept: string.len(view),
           }) ?? ()
           journal.append(cfg, sid, journal.summary_line(tool, label, seen_id, view, string.len(text))) ?? ()
@@ -171,7 +170,7 @@ effect fn run(cfg: config.Config, raw: String, banner: String) -> Option[String]
 // Claude Code persists Bash stdout above ~30 KB to a file and hands the hook only a
 // prefix; the full text lives at tool_response.persistedOutputPath. Vault THAT, so
 // salient-line detection covers the whole output, not just the prefix.
-effect fn full_text(resp: Value, text: String) -> String = match json.get_string(resp, "persistedOutputPath") {
+effect fn full_text(resp: Value, text: String) -> String = match value.get_string(resp, "persistedOutputPath") {
   some(p) => match fs.read_text_if_exists(p) {
     ok(some(full)) => full,
     _ => text,
@@ -191,11 +190,11 @@ fn profile_for(cfg: config.Config, tool: String, persisted: Bool) -> Profile =
   else Profile { head: cfg.head, tail: cfg.tail, salient: cfg.salient, clip: cfg.line_clip }
 
 // For Read, say which window of the file this was so the model can page with offset.
-fn read_window(resp: Value) -> String = match value.field(resp, "file")? {
+fn read_window(resp: Value) -> String = match value.get(resp, "file") {
   some(f) => {
-    let start = json.get_int(f, "startLine") ?? 1
-    let n = json.get_int(f, "numLines") ?? 0
-    let total = json.get_int(f, "totalLines") ?? n
+    let start = value.get_int(f, "startLine") ?? 1
+    let n = value.get_int(f, "numLines") ?? 0
+    let total = value.get_int(f, "totalLines") ?? n
     if total > n then " (lines ${int.to_string(start)}-${int.to_string(start + n - 1)} of ${int.to_string(total)}; page with Read offset/limit)" else ""
   },
   none => "",
@@ -271,11 +270,11 @@ fn narrowed_by_model(tool: String, command: String) -> Bool =
   tool == "Bash" and list.any(["grep ", "rg ", "sed -n", "awk ", "head ", "tail ", "| cut", "jq ", "hew "], (f) => string.contains(command, f))
 
 effect fn vault_and_replace(cfg: config.Config, j: Value, tool: String, input: Value, resp: Value, shape: Shape, prefix_text: String, banner: String) -> Result[String, String] = {
-  let persisted = option.is_some(json.get_string(resp, "persistedOutputPath"))
+  let persisted = option.is_some(value.get_string(resp, "persistedOutputPath"))
   let text = full_text(resp, prefix_text)!
   let id = vault.put(cfg, text)!
   let label = label_of(tool, input)
-  let paged = option.is_some(json.get_int(input, "offset")) or option.is_some(json.get_int(input, "limit"))
+  let paged = option.is_some(value.get_int(input, "offset")) or option.is_some(value.get_int(input, "limit"))
   let as_outline = if tool == "Read" and not paged then read_as_outline(cfg, label, id, resp, text) ?? none else none
   let as_runner = if tool == "Bash" then bash_as_runner(cfg, label, id, text) else search_view(cfg, tool, shape, label, id, text)
   let kind = if option.is_some(as_outline) then "read_outline"
@@ -301,14 +300,14 @@ effect fn vault_and_replace(cfg: config.Config, j: Value, tool: String, input: V
   // head / tail pipelines): cutting a 4 KB excerpt to 2 KB was a miss 2 times out of 3 in a
   // real session. Runner / git / outline / search views carry the verdict and are exempt.
   guard persisted or kind != "generic" or (string.len(text) >= GENERIC_MIN and not narrowed_by_model(tool, label)) else err("generic view withheld")
-  tune.record_hit(cfg, json.get_string(j, "session_id") ?? "", kind, id, label) ?? ()
-  journal.append(cfg, json.get_string(j, "session_id") ?? "", journal.summary_line(tool, label, id, rendered, string.len(text))) ?? ()
+  tune.record_hit(cfg, value.get_string(j, "session_id") ?? "", kind, id, label) ?? ()
+  journal.append(cfg, value.get_string(j, "session_id") ?? "", journal.summary_line(tool, label, id, rendered, string.len(text))) ?? ()
   let rendered_b = if banner == "" then rendered else banner + "\n" + rendered
   let updated = replace(resp, shape, rendered_b)!
   vault.record(cfg, vault.Entry {
     id: id,
-    ts: env.unix_timestamp(),
-    session: json.get_string(j, "session_id") ?? "",
+    ts: datetime.now(),
+    session: value.get_string(j, "session_id") ?? "",
     tool: tool,
     label: label,
     bytes: string.len(text),
@@ -319,14 +318,14 @@ effect fn vault_and_replace(cfg: config.Config, j: Value, tool: String, input: V
 }
 
 test "extract finds bash stdout" {
-  let resp = value.object([("stdout", value.str("hi")), ("stderr", value.str(""))])
+  let resp = value.object([("stdout", value.string("hi")), ("stderr", value.string(""))])
   let (shape, text) = extract(resp)
   assert_eq(text, "hi")
   assert_eq(shape, Stdout)
 }
 
 test "extract finds nested read file content" {
-  let resp = value.object([("file", value.object([("content", value.str("body")), ("numLines", value.int(1))]))])
+  let resp = value.object([("file", value.object([("content", value.string("body")), ("numLines", value.int(1))]))])
   let (shape, text) = extract(resp)
   assert_eq(text, "body")
   assert_eq(shape, FileContent)
@@ -334,9 +333,9 @@ test "extract finds nested read file content" {
 
 test "extract joins mcp text items" {
   let resp = value.object([("content", value.array([
-    value.object([("type", value.str("image")), ("data", value.str("x"))]),
-    value.object([("type", value.str("text")), ("text", value.str("a"))]),
-    value.object([("type", value.str("text")), ("text", value.str("b"))]),
+    value.object([("type", value.string("image")), ("data", value.string("x"))]),
+    value.object([("type", value.string("text")), ("text", value.string("a"))]),
+    value.object([("type", value.string("text")), ("text", value.string("b"))]),
   ]))])
   let (shape, text) = extract(resp)
   assert_eq(text, "a\n\nb")
@@ -344,27 +343,27 @@ test "extract joins mcp text items" {
 }
 
 test "replace keeps sibling fields" {
-  let resp = value.object([("stdout", value.str("big")), ("stderr", value.str("warn")), ("interrupted", value.bool(false))])
+  let resp = value.object([("stdout", value.string("big")), ("stderr", value.string("warn")), ("interrupted", value.bool(false))])
   let out = replace(resp, Stdout, "small")!
-  assert_eq(json.get_string(out, "stdout"), some("small"))
-  assert_eq(json.get_string(out, "stderr"), some("warn"))
-  assert_eq(json.get_bool(out, "interrupted"), some(false))
+  assert_eq(value.get_string(out, "stdout"), some("small"))
+  assert_eq(value.get_string(out, "stderr"), some("warn"))
+  assert_eq(value.get_bool(out, "interrupted"), some(false))
 }
 
 test "replace rebuilds mcp array with one text item" {
   let resp = value.object([("content", value.array([
-    value.object([("type", value.str("image"))]),
-    value.object([("type", value.str("text")), ("text", value.str("a"))]),
+    value.object([("type", value.string("image"))]),
+    value.object([("type", value.string("text")), ("text", value.string("a"))]),
   ]))])
   let out = replace(resp, McpArray, "z")!
-  let items = json.get_array(out, "content") ?? []
+  let items = value.get_array(out, "content") ?? []
   assert_eq(list.len(items), 2)
   assert_eq(mcp_text(items), "z")
 }
 
 test "label_of picks the identifying field" {
-  assert_eq(label_of("Bash", value.object([("command", value.str("cargo test"))])), "cargo test")
-  assert_eq(label_of("Read", value.object([("file_path", value.str("/a/b.rs"))])), "/a/b.rs")
+  assert_eq(label_of("Bash", value.object([("command", value.string("cargo test"))])), "cargo test")
+  assert_eq(label_of("Read", value.object([("file_path", value.string("/a/b.rs"))])), "/a/b.rs")
 }
 
 test "narrowed_by_model spots filter pipelines" {

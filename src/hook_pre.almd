@@ -21,8 +21,8 @@ import self.hewrw
 fn rewrite(cfg: config.Config, tool: String, input: Value) -> Option[Value] = match tool {
   // Only under budget pressure (levels set grep_head_limit > 0) and only for content mode:
   // capping `count` / `files_with_matches` just forces the model into more calls.
-  "Grep" => if cfg.grep_head_limit <= 0 or (json.get_string(input, "output_mode") ?? "files_with_matches") != "content" then none
-    else match json.get_int(input, "head_limit") {
+  "Grep" => if cfg.grep_head_limit <= 0 or (value.get_string(input, "output_mode") ?? "files_with_matches") != "content" then none
+    else match value.get_int(input, "head_limit") {
       some(_) => none,
       none => some(value.merge(input, value.object([("head_limit", value.int(cfg.grep_head_limit))]))),
     },
@@ -31,7 +31,7 @@ fn rewrite(cfg: config.Config, tool: String, input: Value) -> Option[Value] = ma
 
 fn envelope(updated: Value) -> String = json.stringify(value.object([
   ("hookSpecificOutput", value.object([
-    ("hookEventName", value.str("PreToolUse")),
+    ("hookEventName", value.string("PreToolUse")),
     ("updatedInput", updated),
   ])),
 ]))
@@ -52,7 +52,7 @@ type RtkVerdict =
 effect fn rtk_rewrite(cfg: config.Config, command: String) -> RtkVerdict = {
   guard cfg.rtk_bin != "" and command != "" else Keep
   guard not string.starts_with(string.trim(command), "rtk ") and not string.starts_with(string.trim(command), "ctxgate ") else Keep
-  match process.exec_status_timeout(cfg.rtk_bin, ["rewrite", command], 2000) {
+  match process.output(process.ProcessCommand { cmd: cfg.rtk_bin, args: ["rewrite", command], timeout_ms: 2000 }) {
     err(_) => Keep,
     ok(st) => {
       let out = string.trim(st.stdout)
@@ -67,9 +67,9 @@ effect fn rtk_rewrite(cfg: config.Config, command: String) -> RtkVerdict = {
 
 fn envelope_allow(updated: Value, reason: String) -> String = json.stringify(value.object([
   ("hookSpecificOutput", value.object([
-    ("hookEventName", value.str("PreToolUse")),
-    ("permissionDecision", value.str("allow")),
-    ("permissionDecisionReason", value.str(reason)),
+    ("hookEventName", value.string("PreToolUse")),
+    ("permissionDecision", value.string("allow")),
+    ("permissionDecisionReason", value.string(reason)),
     ("updatedInput", updated),
   ])),
 ]))
@@ -78,19 +78,19 @@ fn envelope_allow(updated: Value, reason: String) -> String = json.stringify(val
 effect fn run(cfg: config.Config, raw: String) -> Option[String] = match json.parse(raw) {
   err(_) => none,
   ok(j) => {
-    let tool = json.get_string(j, "tool_name") ?? ""
-    let input = value.field(j, "tool_input") ?? value.object([])
+    let tool = value.get_string(j, "tool_name") ?? ""
+    let input = value.get(j, "tool_input") ?? value.object([])
     // feedback loop: is this call the model recovering from the last replacement?
-    tune.observe_call(cfg, json.get_string(j, "session_id") ?? "", tool, input) ?? ()
+    tune.observe_call(cfg, value.get_string(j, "session_id") ?? "", tool, input) ?? ()
     if tool == "Bash" then {
-      let original = json.get_string(input, "command") ?? ""
+      let original = value.get_string(input, "command") ?? ""
       // 1. reads of source files → hew (when hew is installed and CTXGATE_HEW != 0)
       let command = if cfg.hew_rw then (hewrw.rewrite_reads(original) ?? original) else original
       // 2. the rest of the command surface → rtk
       match rtk_rewrite(cfg, command) ?? Keep {
-        Keep => if command == original then none else some(envelope(value.merge(input, value.object([("command", value.str(command))])))),
+        Keep => if command == original then none else some(envelope(value.merge(input, value.object([("command", value.string(command))])))),
         Rewrite(cmd, allow) => {
-          let updated = value.merge(input, value.object([("command", value.str(cmd))]))
+          let updated = value.merge(input, value.object([("command", value.string(cmd))]))
           some(if allow then envelope_allow(updated, "ctxgate: rewritten via rtk") else envelope(updated))
         },
       }
@@ -110,23 +110,23 @@ fn test_cfg() -> config.Config = config.Config {
 }
 
 test "grep without head_limit gets one" {
-  let input = value.object([("pattern", value.str("foo")), ("path", value.str("src")), ("output_mode", value.str("content"))])
+  let input = value.object([("pattern", value.string("foo")), ("path", value.string("src")), ("output_mode", value.string("content"))])
   match rewrite(test_cfg(), "Grep", input) {
     some(v) => {
-      assert_eq(json.get_int(v, "head_limit"), some(60))
-      assert_eq(json.get_string(v, "pattern"), some("foo"))
+      assert_eq(value.get_int(v, "head_limit"), some(60))
+      assert_eq(value.get_string(v, "pattern"), some("foo"))
     },
     none => assert(false),
   }
 }
 
 test "grep with head_limit is untouched" {
-  let input = value.object([("pattern", value.str("foo")), ("head_limit", value.int(5))])
+  let input = value.object([("pattern", value.string("foo")), ("head_limit", value.int(5))])
   assert(option.is_none(rewrite(test_cfg(), "Grep", input)))
 }
 
 test "other tools pass through" {
-  let input = value.object([("command", value.str("ls"))])
+  let input = value.object([("command", value.string("ls"))])
   assert(option.is_none(rewrite(test_cfg(), "Bash", input)))
 }
 
