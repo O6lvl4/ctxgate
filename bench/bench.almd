@@ -50,7 +50,7 @@ effect fn prepare(repo: String, mode: String, tag: String) -> String = {
 
 effect fn run_one(task: Task, mode: String, n: Int, dir: String, max_turns: String, model: String) -> Run = {
   let home = "${dir}/.ctxgate-home"
-  env.set("CTXGATE_HOME", home)
+  env.set("CTXGATE_HOME", home)!
   let t0 = datetime.now_ms()
   let prompt_file = "${dir}/.bench-prompt.txt"
   fs.write_text(prompt_file, task.prompt)!

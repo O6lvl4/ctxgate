@@ -72,9 +72,9 @@ fn rw_sed(ts: List[String]) -> Option[String] = {
   let file = list.get(ts, 3) ?? ""
   guard source_like(file) else none
   match regex.captures(regex.new("^([0-9]+),([0-9]+)p$"), range) {
-    some(cs) => some("hew ${file} --lines ${list.get(cs, 1) ?? ""}-${list.get(cs, 2) ?? ""}"),
+    some(cs) => some("hew ${file} --lines ${option.flatten(list.get(cs, 1)) ?? ""}-${option.flatten(list.get(cs, 2)) ?? ""}"),
     none => match regex.captures(regex.new("^([0-9]+)p$"), range) {
-      some(cs) => some("hew ${file} --lines ${list.get(cs, 1) ?? ""}-${list.get(cs, 1) ?? ""}"),
+      some(cs) => some("hew ${file} --lines ${option.flatten(list.get(cs, 1)) ?? ""}-${option.flatten(list.get(cs, 1)) ?? ""}"),
       none => none,
     },
   }

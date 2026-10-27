@@ -134,7 +134,7 @@ fn squeeze_hunk(lines: List[String], max_lines: Int) -> List[String] = {
 
 // `@@ -3,7 +3,7 @@ fn f1() -> i32 { 1 }` → `@@ -3 +3 @@ fn f1() -> i32 { 1 }`
 fn short_hunk_header(h: String) -> String = match regex.captures(regex.new("^@@ -([0-9]+)(,[0-9]+)? \\+([0-9]+)(,[0-9]+)? @@(.*)$"), h) {
-  some(c) => "@@ -${list.get(c, 1) ?? ""} +${list.get(c, 3) ?? ""} @@${compress.clip(list.get(c, 5) ?? "", 60)}",
+  some(c) => "@@ -${option.flatten(list.get(c, 1)) ?? ""} +${option.flatten(list.get(c, 3)) ?? ""} @@${compress.clip(option.flatten(list.get(c, 5)) ?? "", 60)}",
   none => compress.clip(h, 80),
 }
 

@@ -45,8 +45,8 @@ fn redact_line(line: String) -> (String, Int) = {
   while guard_n < 4 and not string.contains(l, "[REDACTED:") and regex.is_match(regex.new(assign), l) {
     match regex.captures(regex.new(assign), l) {
       some(c) => {
-        let whole = list.get(c, 0) ?? ""
-        let rebuilt = (list.get(c, 1) ?? "") + (list.get(c, 3) ?? "") + mask("value")
+        let whole = option.flatten(list.get(c, 0)) ?? ""
+        let rebuilt = (option.flatten(list.get(c, 1)) ?? "") + (option.flatten(list.get(c, 3)) ?? "") + mask("value")
         l = string.replace(l, whole, rebuilt)
         n = n + 1
       },

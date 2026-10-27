@@ -16,9 +16,9 @@ type Hit = { path: String, line: Int, text: String, is_match: Bool }
 
 // "a/b.rs:12:let x" → Hit; "a/b.rs-10-context" → context Hit; anything else → none.
 fn parse_hit(l: String) -> Option[Hit] = match regex.captures(regex.new("^([^:]+):([0-9]+):(.*)$"), l) {
-  some(c) => some(Hit { path: list.get(c, 1) ?? "", line: int.parse(list.get(c, 2) ?? "") ?? 0, text: list.get(c, 3) ?? "", is_match: true }),
+  some(c) => some(Hit { path: option.flatten(list.get(c, 1)) ?? "", line: int.parse(option.flatten(list.get(c, 2)) ?? "") ?? 0, text: option.flatten(list.get(c, 3)) ?? "", is_match: true }),
   none => match regex.captures(regex.new("^([^-]+)-([0-9]+)-(.*)$"), l) {
-    some(c) => some(Hit { path: list.get(c, 1) ?? "", line: int.parse(list.get(c, 2) ?? "") ?? 0, text: list.get(c, 3) ?? "", is_match: false }),
+    some(c) => some(Hit { path: option.flatten(list.get(c, 1)) ?? "", line: int.parse(option.flatten(list.get(c, 2)) ?? "") ?? 0, text: option.flatten(list.get(c, 3)) ?? "", is_match: false }),
     none => none,
   },
 }

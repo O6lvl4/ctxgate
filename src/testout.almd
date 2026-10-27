@@ -99,12 +99,12 @@ fn cap(lines: List[String], max: Int) -> List[String] =
   if list.len(lines) <= max then lines
   else list.take(lines, max) + ["    … ${int.to_string(list.len(lines) - max)} more lines (see vault)"]
 
-fn grp(caps: Option[List[String]], i: Int) -> String = match caps {
-  some(xs) => list.get(xs, i) ?? "",
+fn grp(caps: Option[List[Option[String]]], i: Int) -> String = match caps {
+  some(xs) => option.flatten(list.get(xs, i)) ?? "",
   none => "",
 }
 
-fn grp_int(caps: Option[List[String]], i: Int) -> Int = int.parse(grp(caps, i)) ?? 0
+fn grp_int(caps: Option[List[Option[String]]], i: Int) -> Int = int.parse(grp(caps, i)) ?? 0
 
 // Stanzas: a titled block that runs from a start line until the next start / terminator.
 type Stanza = { title: String, body: List[String] }
@@ -171,7 +171,7 @@ fn cargo_test(text: String, max_block: Int) -> Option[String] = {
   }
   let failed_names = lines
     |> list.filter_map((l) => match regex.captures(regex.new("^test (\\S+) \\.\\.\\. FAILED$"), l) {
-      some(c) => list.get(c, 1),
+      some(c) => option.flatten(list.get(c, 1)),
       none => none,
     })
   let stanza_list = stanzas(lines,
@@ -257,7 +257,7 @@ fn go_test(text: String, max_block: Int) -> Option[String] = {
   let pkg_fail = list.filter(lines, (l) => regex.is_match(regex.new("^FAIL\\s+\\S+"), l))
   let pkg_none = list.count(lines, (l) => regex.is_match(regex.new("^\\?\\s+\\S+.*\\[no test files\\]"), l))
   let fails = list.filter_map(lines, (l) => match regex.captures(regex.new("^\\s*--- FAIL: (\\S+)"), l) {
-    some(c) => list.get(c, 1),
+    some(c) => option.flatten(list.get(c, 1)),
     none => none,
   })
   let passes = list.count(lines, (l) => regex.is_match(regex.new("^\\s*--- PASS: "), l))
@@ -268,7 +268,7 @@ fn go_test(text: String, max_block: Int) -> Option[String] = {
     or string.contains(l, "/runtime/") and string.contains(l, ".go:")
   let stanza_list = stanzas(lines,
     (l) => match regex.captures(regex.new("^\\s*--- FAIL: (\\S+)"), l) {
-      some(c) => list.get(c, 1),
+      some(c) => option.flatten(list.get(c, 1)),
       none => none,
     },
     (l) => regex.is_match(regex.new("^\\s*(--- PASS|=== RUN|ok\\s|FAIL\\s|FAIL$|PASS$)"), l))
@@ -336,7 +336,7 @@ fn pytest(text: String, max_block: Int) -> Option[String] = {
   guard option.is_some(summary) else none
   let s = regex.replace(regex.new("^=+ *| *=+$"), summary ?? "", "")
   let failed = list.filter_map(lines, (l) => match regex.captures(regex.new("^(FAILED|ERROR) (\\S+)"), l) {
-    some(c) => list.get(c, 2),
+    some(c) => option.flatten(list.get(c, 2)),
     none => none,
   })
   let stanza_list = stanzas(lines,
@@ -367,7 +367,7 @@ fn vitest(text: String, max_block: Int) -> Option[String] = {
   guard option.is_some(files) or option.is_some(tests) else none
   let stanza_list = stanzas(lines,
     (l) => match regex.captures(regex.new("^\\s*FAIL\\s+(.+)$"), l) {
-      some(c) => if string.contains(grp(some(c), 1), " > ") or string.contains(grp(some(c), 1), ".") then list.get(c, 1) else none,
+      some(c) => if string.contains(grp(some(c), 1), " > ") or string.contains(grp(some(c), 1), ".") then option.flatten(list.get(c, 1)) else none,
       none => none,
     },
     (l) => regex.is_match(regex.new("^\\s*(⎯{3,}|Test Files |✓ |× |✗ )"), l))
@@ -386,7 +386,7 @@ fn jest(text: String, max_block: Int) -> Option[String] = {
   guard option.is_some(tests) else none
   let stanza_list = stanzas(lines,
     (l) => match regex.captures(regex.new("^\\s*● (.+)$"), l) {
-      some(c) => list.get(c, 1),
+      some(c) => option.flatten(list.get(c, 1)),
       none => none,
     },
     (l) => string.starts_with(string.trim(l), "Test Suites:"))
