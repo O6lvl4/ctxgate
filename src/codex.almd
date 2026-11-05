@@ -17,21 +17,21 @@ import regex
 // This label is never executed. Quote arguments so dedup cannot confuse different
 // argv vectors (and so the summary can show exactly what ran).
 fn command_label(args: List[String]) -> String = list.map(args, (arg) =>
-  if arg != "" and regex.is_match("^[a-zA-Z0-9_./:=+-]+$", arg) then arg
+  if arg != "" and regex.is_match(regex.new("^[a-zA-Z0-9_./:=+-]+$"), arg) then arg
   else "'" + string.replace(arg, "'", "'\"'\"'") + "'") |> list.join(" ")
 
 effect fn exec_command(base: config.Config, args: List[String]) -> Unit = {
   let argv = if (list.get(args, 0) ?? "") == "--" then list.drop(args, 1) else args
   guard not list.is_empty(argv) else err("usage: ctxgate exec [--] <program> [args...]")
   let program = list.get(argv, 0) ?? ""
-  let status = process.exec_status(program, list.drop(argv, 1))!
+  let status = process.output(process.ProcessCommand { cmd: program, args: list.drop(argv, 1) })!
   let sid = match env.get("CODEX_THREAD_ID") {
     some(id) => "codex-" + id,
-    none => "exec-" + int.to_string(env.millis()),
+    none => "exec-" + int.to_string(datetime.now_ms()),
   }
   let record = fs.read_text_if_exists(budget.sessions_dir(base) + "/" + sid + ".json") ?? none
   let state = json.parse(record ?? "{}") ?? value.null()
-  let budget_cfg = match json.get_int(state, "pct") {
+  let budget_cfg = match value.get_int(state, "pct") {
     some(pct) => budget.apply(base, budget.level_of(base, pct)),
     none => base,
   }
@@ -41,10 +41,10 @@ effect fn exec_command(base: config.Config, args: List[String]) -> Unit = {
   let label = command + " [cwd=" + (env.cwd() ?? ".") + "; exit=" + int.to_string(status.code) + "]"
   let text = status.stdout + (if status.stderr == "" then "" else "\n[stderr]\n" + status.stderr)
   let input = value.object([
-    ("session_id", value.str(sid)),
-    ("tool_name", value.str("Bash")),
-    ("tool_input", value.object([("command", value.str(label))])),
-    ("tool_response", value.object([("output", value.str(text))])),
+    ("session_id", value.string(sid)),
+    ("tool_name", value.string("Bash")),
+    ("tool_input", value.object([("command", value.string(label))])),
+    ("tool_response", value.object([("output", value.string(text))])),
   ])
   // Lifecycle hooks reset dedup when the model forgets the previous output.
   let result = if hook_post.narrowed_by_model("Bash", command) or string.contains(command, "ctxgate ") then none
@@ -52,9 +52,9 @@ effect fn exec_command(base: config.Config, args: List[String]) -> Unit = {
   match result {
     some(out) => {
       let envelope = json.parse(out) ?? value.null()
-      let hs = value.field(envelope, "hookSpecificOutput") ?? value.null()
-      let updated = value.field(hs, "updatedToolOutput") ?? value.null()
-      match json.get_string(updated, "output") {
+      let hs = value.get(envelope, "hookSpecificOutput") ?? value.null()
+      let updated = value.get(hs, "updatedToolOutput") ?? value.null()
+      match value.get_string(updated, "output") {
         some(summary) => {
           println("[ctxgate] command exit code: " + int.to_string(status.code))
           println(summary)
@@ -75,19 +75,19 @@ effect fn print_original(stdout: String, stderr: String) -> Unit = {
 }
 
 fn session_input(j: Value) -> Value = value.merge(j, value.object([
-  ("session_id", value.str("codex-" + (json.get_string(j, "session_id") ?? ""))),
+  ("session_id", value.string("codex-" + (value.get_string(j, "session_id") ?? ""))),
 ]))
 
 effect fn run(base: config.Config, which: String, raw: String) -> Option[String] = {
   let original = json.parse(raw) ?? value.null()
-  guard (json.get_string(original, "session_id") ?? "") != "" else none
+  guard (value.get_string(original, "session_id") ?? "") != "" else none
   let j = session_input(original)
-  let sid = json.get_string(j, "session_id") ?? ""
+  let sid = value.get_string(j, "session_id") ?? ""
   let (cfg0, _) = budget.effective(base, json.stringify(j)) ?? (base, none)
   let cfg = tune.adjust(cfg0, sid) ?? cfg0
   match which {
     "pre" => {
-      tune.observe_call(cfg, sid, json.get_string(j, "tool_name") ?? "", value.field(j, "tool_input") ?? value.object([])) ?? ()
+      tune.observe_call(cfg, sid, value.get_string(j, "tool_name") ?? "", value.get(j, "tool_input") ?? value.object([])) ?? ()
       none
     },
     "compact" => {
@@ -102,8 +102,8 @@ effect fn run(base: config.Config, which: String, raw: String) -> Option[String]
         none => none,
         some(text) => some(json.stringify(value.object([
           ("hookSpecificOutput", value.object([
-            ("hookEventName", value.str("SessionStart")),
-            ("additionalContext", value.str(text)),
+            ("hookEventName", value.string("SessionStart")),
+            ("additionalContext", value.string(text)),
           ])),
         ]))),
       }
@@ -113,27 +113,27 @@ effect fn run(base: config.Config, which: String, raw: String) -> Option[String]
 }
 
 fn entry(matcher: String, which: String) -> Value = value.object([
-  ("matcher", value.str(matcher)),
+  ("matcher", value.string(matcher)),
   ("hooks", value.array([value.object([
-    ("type", value.str("command")),
-    ("command", value.str("ctxgate hook codex " + which)),
+    ("type", value.string("command")),
+    ("command", value.string("ctxgate hook codex " + which)),
     ("timeout", value.int(15)),
   ])])),
 ])
 
 fn merge_hooks(settings: Value) -> Value = {
-  var hooks = value.field(settings, "hooks") ?? value.object([])
+  var hooks = value.get(settings, "hooks") ?? value.object([])
   for (event, matcher, which) in [
     ("PreToolUse", "^Bash$", "pre"),
     ("PreCompact", "", "compact"),
     ("PostCompact", "", "compact"),
     ("SessionStart", "startup|resume|compact", "session"),
   ] {
-    let old = json.get_array(hooks, event) ?? []
+    let old = value.get_array(hooks, event) ?? []
     // Remove only our handlers, preserving other handlers in the same group.
     let kept = list.filter_map(old, (group) => {
-      let handlers = json.get_array(group, "hooks") ?? []
-      let rest = list.filter(handlers, (h) => not string.starts_with(json.get_string(h, "command") ?? "", "ctxgate hook codex "))
+      let handlers = value.get_array(group, "hooks") ?? []
+      let rest = list.filter(handlers, (h) => not string.starts_with(value.get_string(h, "command") ?? "", "ctxgate hook codex "))
       if list.is_empty(rest) and not list.is_empty(handlers) then none
       else some(value.merge(group, value.object([("hooks", value.array(rest))])))
     })
@@ -144,14 +144,14 @@ fn merge_hooks(settings: Value) -> Value = {
 
 fn valid_hooks(settings: Value) -> Bool = {
   guard string.starts_with(json.stringify(settings), "{") else false
-  let hooks = value.field(settings, "hooks") ?? value.object([])
+  let hooks = value.get(settings, "hooks") ?? value.object([])
   guard string.starts_with(json.stringify(hooks), "{") else false
   list.all(["PreToolUse", "PreCompact", "PostCompact", "SessionStart"], (event) => {
-    match value.field(hooks, event)? {
+    match value.get(hooks, event) {
       none => true,
       some(groups) => match value.as_array(groups) {
         err(_) => false,
-        ok(gs) => list.all(gs, (g) => option.is_some(json.get_array(g, "hooks"))),
+        ok(gs) => list.all(gs, (g) => option.is_some(value.get_array(g, "hooks"))),
       },
     }
   })
@@ -184,7 +184,7 @@ effect fn init(global: Bool) -> Unit = {
   fs.mkdir_p(dir)!
   if raw != next then {
     if fs.exists(path) then fs.copy(path, path + ".bak")! else ()
-    fs.write(path, next)!
+    fs.write_text(path, next)!
   } else ()
   let md = if global then dir + "/AGENTS.md" else env.cwd()! + "/AGENTS.md"
   let prev = fs.read_text_if_exists(md)! ?? ""
@@ -193,7 +193,7 @@ effect fn init(global: Bool) -> Unit = {
     (some(a), some(b)) => string.take(prev, a) + note + string.drop(prev, b + string.len("<!-- ctxgate-codex:end -->")),
     _ => (if prev == "" then "" else string.trim(prev) + "\n\n") + note + "\n",
   }
-  if prev != updated then fs.write(md, updated)! else ()
+  if prev != updated then fs.write_text(md, updated)! else ()
   println("ctxgate Codex hooks written to ${path}; instructions: ${md}")
   println("Restart Codex and review/trust these hooks with /hooks. Project hooks also require a trusted project.")
 }
@@ -203,11 +203,11 @@ effect fn doctor(global: Bool) -> Unit = {
   let raw = fs.read_text_if_exists(dir + "/hooks.json")! ?? "{}"
   let settings = json.parse(raw)!
   guard valid_hooks(settings) else err("invalid Codex hooks.json")
-  let hooks = value.field(settings, "hooks") ?? value.object([])
+  let hooks = value.get(settings, "hooks") ?? value.object([])
   for (event, which) in [("PreToolUse", "pre"), ("PreCompact", "compact"), ("PostCompact", "compact"), ("SessionStart", "session")] {
-    let groups = json.get_array(hooks, event) ?? []
-    let found = list.any(groups, (g) => list.any(json.get_array(g, "hooks") ?? [], (h) =>
-      (json.get_string(h, "command") ?? "") == "ctxgate hook codex " + which))
+    let groups = value.get_array(hooks, event) ?? []
+    let found = list.any(groups, (g) => list.any(value.get_array(g, "hooks") ?? [], (h) =>
+      (value.get_string(h, "command") ?? "") == "ctxgate hook codex " + which))
     println((if found then "✓ " else "✗ ") + event)
   }
   let md = if global then dir + "/AGENTS.md" else env.cwd()! + "/AGENTS.md"

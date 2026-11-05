@@ -30,14 +30,14 @@ fn last_path(cfg: config.Config, sid: String) -> String = "${cfg.home}/sessions/
 effect fn record_hit(cfg: config.Config, sid: String, kind: String, id: String, label: String) -> Unit = {
   guard sid != "" else ()
   fs.mkdir_p("${cfg.home}/sessions")!
-  let ts = env.unix_timestamp()
-  fs.append(tune_path(cfg, sid), json.stringify(value.object([("kind", value.str(kind)), ("event", value.str("hit")), ("ts", value.int(ts))])) + "\n")!
-  fs.write(last_path(cfg, sid), json.stringify(value.object([("kind", value.str(kind)), ("id", value.str(id)), ("label", value.str(label)), ("ts", value.int(ts))])))!
+  let ts = datetime.now()
+  fs.append_text(tune_path(cfg, sid), json.stringify(value.object([("kind", value.string(kind)), ("event", value.string("hit")), ("ts", value.int(ts))])) + "\n")!
+  fs.write_text(last_path(cfg, sid), json.stringify(value.object([("kind", value.string(kind)), ("id", value.string(id)), ("label", value.string(label)), ("ts", value.int(ts))])))!
 }
 
 effect fn last(cfg: config.Config, sid: String) -> Option[Last] = match fs.read_text_if_exists(last_path(cfg, sid)) {
   ok(some(t)) => match json.parse(t) {
-    ok(j) => some(Last { kind: json.get_string(j, "kind") ?? "", id: json.get_string(j, "id") ?? "", label: json.get_string(j, "label") ?? "", ts: json.get_int(j, "ts") ?? 0 }),
+    ok(j) => some(Last { kind: value.get_string(j, "kind") ?? "", id: value.get_string(j, "id") ?? "", label: value.get_string(j, "label") ?? "", ts: value.get_int(j, "ts") ?? 0 }),
     err(_) => none,
   },
   _ => none,
@@ -45,8 +45,8 @@ effect fn last(cfg: config.Config, sid: String) -> Option[Last] = match fs.read_
 
 // Is this tool call the model going back for what a replacement withheld?
 fn is_recovery(tool: String, input: Value, l: Last) -> Bool = {
-  let cmd = json.get_string(input, "command") ?? ""
-  let path = json.get_string(input, "file_path") ?? json.get_string(input, "path") ?? ""
+  let cmd = value.get_string(input, "command") ?? ""
+  let path = value.get_string(input, "file_path") ?? value.get_string(input, "path") ?? ""
   if tool == "Bash" and (string.contains(cmd, "ctxgate show") or string.contains(cmd, "ctxgate recall")) then true
   else if tool == "Bash" and cmd != "" and cmd == l.label then true                       // same command again
   else if tool == "Read" and path != "" and path == l.label then true                      // re-read (paged or not)
@@ -60,8 +60,8 @@ effect fn observe_call(cfg: config.Config, sid: String, tool: String, input: Val
   match last(cfg, sid) ?? none {
     none => (),
     some(l) => {
-      guard env.unix_timestamp() - l.ts <= RECOVERY_SECS and is_recovery(tool, input, l) else ()
-      fs.append(tune_path(cfg, sid), json.stringify(value.object([("kind", value.str(l.kind)), ("event", value.str("miss")), ("ts", value.int(env.unix_timestamp()))])) + "\n")!
+      guard datetime.now() - l.ts <= RECOVERY_SECS and is_recovery(tool, input, l) else ()
+      fs.append_text(tune_path(cfg, sid), json.stringify(value.object([("kind", value.string(l.kind)), ("event", value.string("miss")), ("ts", value.int(datetime.now()))])) + "\n")!
       fs.remove(last_path(cfg, sid)) ?? ()   // one miss per replacement
     },
   }
@@ -73,7 +73,7 @@ effect fn stats(cfg: config.Config, sid: String) -> List[Stat] = {
     _ => [],
   }
   let events = list.filter_map(lines, (l) => match json.parse(l) {
-    ok(j) => some((json.get_string(j, "kind") ?? "", json.get_string(j, "event") ?? "")),
+    ok(j) => some((value.get_string(j, "kind") ?? "", value.get_string(j, "event") ?? "")),
     err(_) => none,
   })
   var kinds: List[String] = []
@@ -110,10 +110,10 @@ effect fn adjust(cfg: config.Config, sid: String) -> config.Config = {
 
 test "recovery detection" {
   let l = Last { kind: "read_outline", id: "x", label: "/a/b.rs", ts: 0 }
-  assert(is_recovery("Read", value.object([("file_path", value.str("/a/b.rs")), ("offset", value.int(10))]), l))
-  assert(is_recovery("Bash", value.object([("command", value.str("ctxgate show x --symbol f"))]), l))
-  assert(is_recovery("Grep", value.object([("pattern", value.str("fn")), ("path", value.str("/a/b.rs"))]), l))
-  assert(not is_recovery("Read", value.object([("file_path", value.str("/a/c.rs"))]), l))
+  assert(is_recovery("Read", value.object([("file_path", value.string("/a/b.rs")), ("offset", value.int(10))]), l))
+  assert(is_recovery("Bash", value.object([("command", value.string("ctxgate show x --symbol f"))]), l))
+  assert(is_recovery("Grep", value.object([("pattern", value.string("fn")), ("path", value.string("/a/b.rs"))]), l))
+  assert(not is_recovery("Read", value.object([("file_path", value.string("/a/c.rs"))]), l))
 }
 
 test "softening needs both a count and a rate" {

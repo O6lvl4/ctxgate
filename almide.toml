@@ -5,3 +5,8 @@ edition = "2026"
 
 [dependencies]
 hew = { git = "https://github.com/O6lvl4/hew" }
+
+# Dialect epoch 15 (#4093): a git dependency outside github.com/almide is fetched only
+# from an owner the root manifest trusts.
+[trust]
+owners = ["github.com/O6lvl4"]

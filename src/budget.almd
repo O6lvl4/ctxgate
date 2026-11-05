@@ -55,13 +55,13 @@ effect fn usage_from_transcript(path: String) -> Option[Int] = {
     none => none,
     some(l) => match json.parse(l) {
       err(_) => none,
-      ok(j) => match value.field(j, "message")? {
+      ok(j) => match value.get(j, "message") {
         none => none,
-        some(m) => match value.field(m, "usage")? {
+        some(m) => match value.get(m, "usage") {
           none => none,
-          some(u) => some((json.get_int(u, "input_tokens") ?? 0)
-            + (json.get_int(u, "cache_read_input_tokens") ?? 0)
-            + (json.get_int(u, "cache_creation_input_tokens") ?? 0)),
+          some(u) => some((value.get_int(u, "input_tokens") ?? 0)
+            + (value.get_int(u, "cache_read_input_tokens") ?? 0)
+            + (value.get_int(u, "cache_creation_input_tokens") ?? 0)),
         },
       },
     },
@@ -72,12 +72,12 @@ effect fn usage_from_transcript(path: String) -> Option[Int] = {
 // cached_input_tokens is already included in input_tokens and must not be added.
 fn codex_usage_line(line: String) -> Option[(Int, Int)] = {
   let j = json.parse(line) ?? value.null()
-  guard (json.get_string(j, "type") ?? "") == "event_msg" else none
-  let p = value.field(j, "payload") ?? value.null()
-  guard (json.get_string(p, "type") ?? "") == "token_count" else none
-  let info = value.field(p, "info") ?? value.null()
-  let last = value.field(info, "last_token_usage") ?? value.null()
-  match (json.get_int(last, "input_tokens"), json.get_int(info, "model_context_window")) {
+  guard (value.get_string(j, "type") ?? "") == "event_msg" else none
+  let p = value.get(j, "payload") ?? value.null()
+  guard (value.get_string(p, "type") ?? "") == "token_count" else none
+  let info = value.get(p, "info") ?? value.null()
+  let last = value.get(info, "last_token_usage") ?? value.null()
+  match (value.get_int(last, "input_tokens"), value.get_int(info, "model_context_window")) {
     (some(used), some(window)) => if used >= 0 and window > 0 then some((used, window)) else none,
     _ => none,
   }
@@ -141,22 +141,22 @@ effect fn record_usage(cfg: config.Config, session_id: String, u: Usage, compact
   // A new compaction means the model no longer remembers what it saw: the dedup memory for
   // this session must go, and the journal gets a divider so `recall` shows the boundary.
   let prev_compactions = match fs.read_text_if_exists("${sessions_dir(cfg)}/${session_id}.json") {
-    ok(some(t)) => match json.parse(t) { ok(j) => json.get_int(j, "compactions") ?? 0, err(_) => 0 },
+    ok(some(t)) => match json.parse(t) { ok(j) => value.get_int(j, "compactions") ?? 0, err(_) => 0 },
     _ => 0,
   }
   if compactions > prev_compactions then {
     dedup.forget_session(cfg, session_id)!
     journal.mark(cfg, session_id, "compaction #${int.to_string(compactions)}")!
   } else ()
-  fs.write("${sessions_dir(cfg)}/${session_id}.json", json.stringify(value.object([
-    ("session", value.str(session_id)),
+  fs.write_text("${sessions_dir(cfg)}/${session_id}.json", json.stringify(value.object([
+    ("session", value.string(session_id)),
     ("compactions", value.int(compactions)),
-    ("transcript", value.str(transcript)),
+    ("transcript", value.string(transcript)),
     ("used", value.int(u.used)),
     ("window", value.int(u.window)),
     ("pct", value.int(u.pct)),
-    ("level", value.str(level_name(u.level))),
-    ("ts", value.int(env.unix_timestamp())),
+    ("level", value.string(level_name(u.level))),
+    ("ts", value.int(datetime.now())),
   ])))!
 }
 
@@ -168,8 +168,8 @@ let REPORTED_FRESH_SECS = 180
 effect fn record_reported(cfg: config.Config, session_id: String, pct: Int) -> Unit = {
   guard session_id != "" else ()
   fs.mkdir_p(sessions_dir(cfg))!
-  fs.write("${sessions_dir(cfg)}/${session_id}.reported.json", json.stringify(value.object([
-    ("pct", value.int(pct)), ("ts", value.int(env.unix_timestamp())),
+  fs.write_text("${sessions_dir(cfg)}/${session_id}.reported.json", json.stringify(value.object([
+    ("pct", value.int(pct)), ("ts", value.int(datetime.now())),
   ])))!
 }
 
@@ -178,8 +178,8 @@ effect fn reported_pct(cfg: config.Config, session_id: String) -> Option[Int] = 
   match fs.read_text_if_exists("${sessions_dir(cfg)}/${session_id}.reported.json") {
     ok(some(t)) => match json.parse(t) {
       ok(j) => {
-        let ts = json.get_int(j, "ts") ?? 0
-        if env.unix_timestamp() - ts <= REPORTED_FRESH_SECS then json.get_int(j, "pct") else none
+        let ts = value.get_int(j, "ts") ?? 0
+        if datetime.now() - ts <= REPORTED_FRESH_SECS then value.get_int(j, "pct") else none
       },
       err(_) => none,
     },
@@ -192,8 +192,8 @@ effect fn reported_pct(cfg: config.Config, session_id: String) -> Option[Int] = 
 effect fn effective(cfg: config.Config, raw_hook_input: String) -> (config.Config, Option[Usage]) = match json.parse(raw_hook_input) {
   err(_) => (cfg, none),
   ok(j) => {
-    let sid = json.get_string(j, "session_id") ?? ""
-    let path = json.get_string(j, "transcript_path") ?? ""
+    let sid = value.get_string(j, "session_id") ?? ""
+    let path = value.get_string(j, "transcript_path") ?? ""
     let is_codex = string.starts_with(sid, "codex-")
     let measured = if is_codex then codex_usage(path) ?? none else match usage_from_transcript(path) ?? none {
       some(used) => some((used, cfg.window)), none => none,
@@ -221,7 +221,7 @@ effect fn current_session(cfg: config.Config) -> Option[Value] = {
     some(id) => {
       let sid = "codex-" + id
       let raw = fs.read_text_if_exists(sessions_dir(cfg) + "/" + sid + ".json")! ?? "{}"
-      some(value.merge(json.parse(raw) ?? value.object([]), value.object([("session", value.str(sid))])))
+      some(value.merge(json.parse(raw) ?? value.object([]), value.object([("session", value.string(sid))])))
     },
     none => latest_session(cfg)!,
   }
@@ -233,7 +233,7 @@ effect fn latest_session(cfg: config.Config) -> Option[Value] = {
   let names = (fs.list_dir(dir) ?? []) |> list.filter((n) => string.ends_with(n, ".json") and not string.contains(n, ".reported.") and not string.contains(n, ".seen."))
   let stamped = list.filter_map(names, (n) => {
     let p = "${dir}/${n}"
-    match fs.modified_at(p) {
+    match (fs.stat(p) |> result.map((s) => s.modified)) {
       ok(t) => some((t, p)),
       err(_) => none,
     }

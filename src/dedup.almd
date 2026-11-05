@@ -35,8 +35,8 @@ effect fn last_seen(cfg: config.Config, sid: String, key: String) -> Option[Seen
     _ => [],
   }
   list.reverse(lines) |> list.filter_map((l) => match json.parse(l) {
-    ok(j) => if (json.get_string(j, "key") ?? "") == key
-      then some(Seen { key: key, id: json.get_string(j, "id") ?? "", ts: json.get_int(j, "ts") ?? 0 })
+    ok(j) => if (value.get_string(j, "key") ?? "") == key
+      then some(Seen { key: key, id: value.get_string(j, "id") ?? "", ts: value.get_int(j, "ts") ?? 0 })
       else none,
     err(_) => none,
   }) |> list.first
@@ -45,8 +45,8 @@ effect fn last_seen(cfg: config.Config, sid: String, key: String) -> Option[Seen
 effect fn remember(cfg: config.Config, sid: String, key: String, id: String) -> Unit = {
   guard sid != "" else ()
   fs.mkdir_p("${cfg.home}/sessions")!
-  fs.append(seen_path(cfg, sid), json.stringify(value.object([
-    ("key", value.str(key)), ("id", value.str(id)), ("ts", value.int(env.unix_timestamp())),
+  fs.append_text(seen_path(cfg, sid), json.stringify(value.object([
+    ("key", value.string(key)), ("id", value.string(id)), ("ts", value.int(datetime.now())),
   ])) + "\n")!
 }
 

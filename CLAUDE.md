@@ -34,7 +34,7 @@ effect fn read(path: String) -> Result[String, String] = {
   ok(text)
 }
 
-// Main entry point (args via process.args(), Result is auto-wrapped)
+// Main entry point (args via env.args(), Result is auto-wrapped)
 effect fn main() -> Unit = {
   println("hello")
 }

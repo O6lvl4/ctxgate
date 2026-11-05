@@ -17,7 +17,7 @@ fn size(v: Value) -> Int = string.len(json.stringify(v))
 fn text_size(v: Value) -> Int = match value.as_string(v) {
   ok(s) => string.len(s),
   err(_) => match value.as_array(v) {
-    ok(items) => list.sum(list.map(items, (i) => string.len(json.get_string(i, "text") ?? json.get_string(i, "content") ?? ""))),
+    ok(items) => list.sum(list.map(items, (i) => string.len(value.get_string(i, "text") ?? value.get_string(i, "content") ?? ""))),
     err(_) => size(v),
   },
 }
@@ -31,25 +31,25 @@ fn bump(acc: List[Share], name: String, bytes: Int, governed: Bool) -> List[Shar
 fn classify(line: String) -> List[(String, Int, Bool)] = match json.parse(line) {
   err(_) => [],
   ok(j) => {
-    let t = json.get_string(j, "type") ?? ""
+    let t = value.get_string(j, "type") ?? ""
     if t == "attachment" then {
-      let a = json.get_path(j, json.field(json.root(), "attachment")) ?? value.object([])
-      [("harness: ${json.get_string(a, "type") ?? "?"}", size(a), false)]
+      let a = value.get_path(j, value.key(value.root(), "attachment")) ?? value.object([])
+      [("harness: ${value.get_string(a, "type") ?? "?"}", size(a), false)]
     } else if t == "user" then {
-      let msg = json.get_path(j, json.field(json.root(), "message")) ?? value.object([])
-      let compact = json.get_bool(j, "isCompactSummary") ?? false
-      match json.get_array(msg, "content") {
-        none => [(if compact then "compaction summary" else "user prompt", string.len(json.get_string(msg, "content") ?? ""), false)],
-        some(items) => list.map(items, (i) => match json.get_string(i, "type") ?? "" {
-          "tool_result" => ("tool output (after ctxgate)", text_size(json.get_path(i, json.field(json.root(), "content")) ?? value.str("")), true),
-          _ => (if compact then "compaction summary" else "user prompt", string.len(json.get_string(i, "text") ?? ""), false),
+      let msg = value.get_path(j, value.key(value.root(), "message")) ?? value.object([])
+      let compact = value.get_bool(j, "isCompactSummary") ?? false
+      match value.get_array(msg, "content") {
+        none => [(if compact then "compaction summary" else "user prompt", string.len(value.get_string(msg, "content") ?? ""), false)],
+        some(items) => list.map(items, (i) => match value.get_string(i, "type") ?? "" {
+          "tool_result" => ("tool output (after ctxgate)", text_size(value.get_path(i, value.key(value.root(), "content")) ?? value.string("")), true),
+          _ => (if compact then "compaction summary" else "user prompt", string.len(value.get_string(i, "text") ?? ""), false),
         }),
       }
     } else if t == "assistant" then {
-      let msg = json.get_path(j, json.field(json.root(), "message")) ?? value.object([])
-      list.filter_map(json.get_array(msg, "content") ?? [], (i) => match json.get_string(i, "type") ?? "" {
-        "text" => some(("assistant text", string.len(json.get_string(i, "text") ?? ""), false)),
-        "tool_use" => some(("${json.get_string(i, "name") ?? "?"} input", size(json.get_path(i, json.field(json.root(), "input")) ?? value.object([])), false)),
+      let msg = value.get_path(j, value.key(value.root(), "message")) ?? value.object([])
+      list.filter_map(value.get_array(msg, "content") ?? [], (i) => match value.get_string(i, "type") ?? "" {
+        "text" => some(("assistant text", string.len(value.get_string(i, "text") ?? ""), false)),
+        "tool_use" => some(("${value.get_string(i, "name") ?? "?"} input", size(value.get_path(i, value.key(value.root(), "input")) ?? value.object([])), false)),
         _ => none,
       })
     } else []
