@@ -462,7 +462,7 @@ effect fn cmd_gc(cfg: config.Config, args: List[String], verbose: Bool) -> Unit 
   let store = vault.store_dir(cfg)
   for n in (fs.list_dir(store) ?? []) {
     let p = "${store}/${n}"
-    let old = ((fs.stat(p) |> result.map((s) => s.modified)) ?? cutoff + 1) < cutoff
+    let old = ((fs.stat(p) |> result.map((s) => s.modified)) ?? (cutoff + 1)) < cutoff
     if old and string.ends_with(n, ".txt") then {
       freed = freed + ((fs.stat(p) |> result.map((s) => s.size)) ?? 0)
       list.push(dropped, string.slice(n, 0, string.len(n) - 4))
@@ -473,7 +473,7 @@ effect fn cmd_gc(cfg: config.Config, args: List[String], verbose: Bool) -> Unit 
   var dropped_sessions = 0
   for n in (fs.list_dir(sessions) ?? []) {
     let p = "${sessions}/${n}"
-    if ((fs.stat(p) |> result.map((s) => s.modified)) ?? cutoff + 1) < cutoff then {
+    if ((fs.stat(p) |> result.map((s) => s.modified)) ?? (cutoff + 1)) < cutoff then {
       dropped_sessions = dropped_sessions + 1
       if dry then () else fs.remove(p) ?? ()
     } else ()
